@@ -15,6 +15,7 @@ struct ConfigAccount {
     std::string email;
     std::string serverName;
     std::string characterName;
+    bool relog;
 };
 
 export nlohmann::json configJson;
@@ -23,7 +24,7 @@ export std::vector<ConfigAccount> config_accounts;
 std::string newConfigText;
 
 ImGui::FileBrowser fileDialog;
-std::string currentFile = "C:\\_\\cur\\tetra_classic_era\\x64\\Release\\config.json";
+std::string currentFile = "C:\\_\\local_wow_manager\\local_wow_manager\\x64\\Release\\config.json";
 std::vector<std::string> configLines;
 
 export void LoadConfigFile(const std::string& filename) {
@@ -44,6 +45,7 @@ export void LoadConfigFile(const std::string& filename) {
         account.email = accountJson["email"];
         account.serverName = accountJson["serverName"];
         account.characterName = accountJson["characterName"];
+        account.relog = accountJson["relog"];
         config_accounts.push_back(account);
     }
 }
@@ -58,6 +60,7 @@ export void SaveConfigFile(const std::string& filename) {
         accountJson["email"] = account.email;
         accountJson["serverName"] = account.serverName;
         accountJson["characterName"] = account.characterName;
+        accountJson["relog"] = account.relog;
         newJson["accounts"].push_back(accountJson);
     }
     std::ofstream file(filename);
@@ -135,11 +138,11 @@ export void DrawConfigManager() {
             ImGui::SameLine(0.0f, 10);
             std::string buttonLabel = "START # " + std::to_string(account.accountNumber) + " #";
             if (ImGui::Button(buttonLabel.c_str())) {
-                wow_start::LaunchAccount(account.accountNumber, account.email, "-config " + account.email + ".wtf");
+                wow_start::LaunchAccount(account.accountNumber, account.email, "-config " + account.email + ".wtf", account.relog);
             }
-            bool relog = false; // Initialize a boolean variable for the checkbox state
+            
             ImGui::SameLine(0.0f, 20); // Add a little space between the button and the checkbox
-            ImGui::Checkbox("Relog", &relog); // Add the checkbox
+            ImGui::Checkbox("Relog", &account.relog); // Add the checkbox
             wowstart_commands.push_back({ account, "-config " + account.email + ".wtf" });
         }
     }

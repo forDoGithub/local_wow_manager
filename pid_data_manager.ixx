@@ -3,6 +3,7 @@
 export module pid_data_manager;
 
 export struct PIDData {
+    bool relog = false;
     std::chrono::system_clock::time_point startTime;
     std::chrono::system_clock::time_point endTime;
     int accountNumber;

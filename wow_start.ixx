@@ -7,9 +7,9 @@ export module wow_start;
 // CONSTANTS
 //const std::wstring app_path = LR"(C:\Users\pc\Desktop\wow1\_classic_era_\)";
 //const std::wstring app_path = LR"(C:\Program Files (x86)\World of Warcraft\_classic_era_\)"; 
-const std::wstring app_path = LR"(C:\Program Files (x86)\World of Warcraft\_classic_era_\)";
-const std::wstring common = L"common.dll";
-const std::wstring app_name = L"Wowclassic.exe";
+const std::wstring app_path = LR"(C:\Program Files (x86)\World of Warcraft\_retail_\)";
+//const std::wstring common = L"common.dll";
+const std::wstring app_name = L"Wow.exe";
 const std::wstring dll_name = L"tetra.dll";
 
 // WINDOW CALLBACK
@@ -81,7 +81,7 @@ int initialize(DWORD pid)
 	if (window(pid))
 	{
 		Sleep(3000); 
-		load(pid, std::filesystem::current_path().append(common).c_str());
+		//load(pid, std::filesystem::current_path().append(common).c_str());
 		load(pid, std::filesystem::current_path().append(dll_name).c_str());
 
 		return 0;
@@ -106,7 +106,13 @@ export namespace wow_start {
 
 		return emails;
 	}
-
+    bool isProcessRunning(DWORD pid) {
+        HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+        DWORD ret = WaitForSingleObject(process, 0);
+        CloseHandle(process);
+        return ret == WAIT_TIMEOUT;
+    }
+    
     void stopProcess(DWORD pid) {
         // Open a handle to the process
         HANDLE processHandle = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
@@ -124,8 +130,25 @@ export namespace wow_start {
         // Close the handle to the process
         CloseHandle(processHandle);
     }
+    void LaunchAccount(int accountNumber, const std::string& email, const std::string& additionalArgs, bool relog);
+    void monitorAndRelog(DWORD pid, int accountNumber, const std::string& email, const std::string& additionalArgs = "", bool relog = false) {
+        while (true) {
+            // Check if process is still running
+            if (!isProcessRunning(pid)) {
+                std::cout << "Process " << pid << " has exited. Attempting to restart." << std::endl;
 
-    void LaunchAccount(int accountNumber, const std::string& email, const std::string& additionalArgs = "") {
+                // Launch the game again for the same account
+                LaunchAccount(accountNumber, email, additionalArgs, relog);
+
+                // Exit the loop since LaunchAccount will handle monitoring for the new process
+                return;
+            }
+
+            // Sleep for a specified time before checking again
+            Sleep(10000); // Example: 10 seconds
+        }
+    }
+    void LaunchAccount(int accountNumber, const std::string& email, const std::string& additionalArgs = "", bool relog = false) {
         // Get the PIDDataManager instance
         PIDDataManager& manager = PIDDataManager::getInstance();
 
@@ -147,7 +170,7 @@ export namespace wow_start {
                     manager.removeLaunchingPID(pidDataEntry.first);
 
                     // Start the process again
-                    LaunchAccount(accountNumber, email, additionalArgs);
+                    LaunchAccount(accountNumber, email, additionalArgs, relog);
                     return;
                 }
                 else {
@@ -156,7 +179,7 @@ export namespace wow_start {
                 }
             }
         }
-
+        
         // If there's no launching PID for this account, proceed with the existing code...
         // ...
 
@@ -183,6 +206,7 @@ export namespace wow_start {
             DWORD pid = pi.dwProcessId;
             // Mark the PID as created but not initialized in PIDDataManager
             auto& pidData = manager.getOrCreatePIDData(pid);
+            pidData.relog = relog;
             pidData.c_init = false;
             pidData.isNewPID = true;
             pidData.accountNumber = accountNumber;
@@ -211,11 +235,29 @@ export namespace wow_start {
 
             // Detach the thread to allow it to run independently
             initThread.detach();
+
+            // Start the monitoring in a separate thread
+            std::thread monitorThread([pid, accountNumber, email, additionalArgs, relog, &manager]() {
+                // Wait for initialization to complete
+                while (!manager.getOrCreatePIDData(pid).initialized) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+                while (true) {
+                    if (!manager.getOrCreatePIDData(pid).relog || !isProcessRunning(pid)) {
+                        // If relog is false or process is not running, break out of the loop
+                        break;
+                    }
+                    // Begin monitoring
+                    monitorAndRelog(pid, accountNumber, email, additionalArgs, relog);
+                }
+                
+                });
+            monitorThread.detach();
         }
         else {
             std::cout << "Failed to create process. Error Code: " << GetLastError() << std::endl;
         }
     }
-
+    
     // Additional utility functions if needed
 }
