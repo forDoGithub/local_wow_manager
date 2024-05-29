@@ -130,9 +130,6 @@ export void DrawConfigManager() {
         if (account.active != wasActive) {
             SaveConfigFile(currentFile);
             LoadConfigFile(currentFile);
-            //auto& pidDataManager = PIDDataManager::getInstance();
-            //auto& pidData = pidDataManager.getOrCreatePIDData(account.accountNumber);
-            //pidData.c_init = account.active;
         }
         if (account.active) {
             ImGui::SameLine(0.0f, 10);
@@ -140,9 +137,16 @@ export void DrawConfigManager() {
             if (ImGui::Button(buttonLabel.c_str())) {
                 wow_start::LaunchAccount(account.accountNumber, account.email, "-config " + account.email + ".wtf", account.relog);
             }
-            
+        
+            // Handle changes in the "Relog" checkbox state
+            bool wasRelog = account.relog;
             ImGui::SameLine(0.0f, 20); // Add a little space between the button and the checkbox
-            ImGui::Checkbox("Relog", &account.relog); // Add the checkbox
+            ImGui::Checkbox("Relog", &account.relog); // Render the "Relog" checkbox
+            if (account.relog != wasRelog) {
+                // If the "relog" state changed, save and reload the config
+                SaveConfigFile(currentFile);
+                LoadConfigFile(currentFile);
+            }
             wowstart_commands.push_back({ account, "-config " + account.email + ".wtf" });
         }
     }

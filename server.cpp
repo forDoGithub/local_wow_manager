@@ -358,7 +358,7 @@ int main()
 
 	::DestroyWindow(window.getHwnd());
 	//navigation_thread.join();
-	message_thread.join();
+	//message_thread.join();
 
 	return 0;
 }

@@ -1,5 +1,8 @@
 #include "framework.h"
-
+#include <tlhelp32.h>s
+#include <tchar.h>
+#include <psapi.h>
+#pragma comment(lib, "psapi")
 import pid_data_manager;
 // wow_starter.ixx
 export module wow_start;
@@ -68,26 +71,42 @@ int load(DWORD pid, const wchar_t* path)
 
 	if (!thread)
 		return -1;
-
 	WaitForSingleObject(thread, INFINITE);
 	VirtualFreeEx(process, dll, sz_dll, MEM_FREE);
+    CloseHandle(process);
+    CloseHandle(thread);
 
 	return 0;
 }
 
+bool waitForWindow(DWORD pid, int timeout_ms) {
+    auto start_time = std::chrono::steady_clock::now();
+    while (std::chrono::steady_clock::now() - start_time < std::chrono::milliseconds(timeout_ms)) {
+        if (window(pid)) {
+            return true;
+        }
+        Sleep(100);  // Check every 100 milliseconds
+    }
+    return false;  // Timeout
+}
+
 // DETECT GUI
-int initialize(DWORD pid)
-{
-	if (window(pid))
-	{
-		Sleep(3000); 
-		//load(pid, std::filesystem::current_path().append(common).c_str());
-		load(pid, std::filesystem::current_path().append(dll_name).c_str());
+int initialize(DWORD pid, int timeout_ms = 30000) {
+    HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (!process) {
+        return -1;
+    }
 
-		return 0;
-	}
+    DWORD waitResult = WaitForInputIdle(process, timeout_ms);
+    CloseHandle(process);
 
-	return 1;
+    if (waitResult == 0) {  // The process is idle, meaning it has finished initialization
+        if (waitForWindow(pid, timeout_ms)) {  // Ensure the window is created
+            load(pid, std::filesystem::current_path().append(dll_name).c_str());
+            return 0;
+        }
+    }
+    return 1;  // Timeout or error
 }
 
 export namespace wow_start {
@@ -130,7 +149,45 @@ export namespace wow_start {
         // Close the handle to the process
         CloseHandle(processHandle);
     }
+
+    void CloseBlizzardErrorProcess() {
+        DWORD aProcesses[1024], cbNeeded, cProcesses;
+        unsigned int i;
+
+        if (!EnumProcesses(aProcesses, sizeof(aProcesses), &cbNeeded)) {
+            // Failed to enumerate processes
+            return;
+        }
+
+        cProcesses = cbNeeded / sizeof(DWORD);
+
+        for (i = 0; i < cProcesses; i++) {
+            if (aProcesses[i] != 0) {
+                TCHAR szProcessName[MAX_PATH] = TEXT("<unknown>");
+                HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_TERMINATE, FALSE, aProcesses[i]);
+
+                if (hProcess != NULL) {
+                    HMODULE hMod;
+                    DWORD cbNeeded;
+
+                    if (EnumProcessModules(hProcess, &hMod, sizeof(hMod), &cbNeeded)) {
+                        GetModuleBaseName(hProcess, hMod, szProcessName, sizeof(szProcessName) / sizeof(TCHAR));
+                    }
+
+                    // If a process with the name "BlizzardError" exists, terminate it
+                    if (_tcscmp(szProcessName, TEXT("BlizzardError.exe")) == 0) {
+                        TerminateProcess(hProcess, 0);
+                    }
+
+                    CloseHandle(hProcess);
+                }
+            }
+        }
+    }
     void LaunchAccount(int accountNumber, const std::string& email, const std::string& additionalArgs, bool relog);
+
+
+
     void monitorAndRelog(DWORD pid, int accountNumber, const std::string& email, const std::string& additionalArgs = "", bool relog = false) {
         while (true) {
             // Check if process is still running
@@ -143,9 +200,9 @@ export namespace wow_start {
                 // Exit the loop since LaunchAccount will handle monitoring for the new process
                 return;
             }
-
+			CloseBlizzardErrorProcess();
             // Sleep for a specified time before checking again
-            Sleep(10000); // Example: 10 seconds
+            Sleep(1000); // Example: 10 seconds
         }
     }
     void LaunchAccount(int accountNumber, const std::string& email, const std::string& additionalArgs = "", bool relog = false) {
@@ -179,9 +236,6 @@ export namespace wow_start {
                 }
             }
         }
-        
-        // If there's no launching PID for this account, proceed with the existing code...
-        // ...
 
         std::cout << "Launching account with email: " << email << std::endl;
         std::cout << "Additional arguments: " << additionalArgs << std::endl;
@@ -190,7 +244,6 @@ export namespace wow_start {
         PROCESS_INFORMATION pi;
         DWORD flags = CREATE_SUSPENDED;
 
-        // Here you should define app_path and app_name according to your context
         auto path = app_path + app_name;
         std::wstringstream cmdLineStream;
         cmdLineStream << L"\"" << path << L"\" " << std::wstring(additionalArgs.begin(), additionalArgs.end());
@@ -217,20 +270,20 @@ export namespace wow_start {
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
 
-
             // Create a new thread for initializing the process
             std::thread initThread([pid, &manager]() {
-                while (initialize(pid)) {
-                    std::cout << "Initializing... PID: " << pid << std::endl;
-                    Sleep(100);
+                if (initialize(pid) == 0) {
+                    // Mark the PID as initialized in PIDDataManager
+                    manager.getOrCreatePIDData(pid).initialized = true;
+                    manager.getOrCreatePIDData(pid).isNewPID = false;
+                    // Remove the PID from the launching map
+                    manager.removeLaunchingPID(pid);
+                    std::cout << "Initialization complete for PID: " << pid << std::endl;
                 }
-
-                // Mark the PID as initialized in PIDDataManager
-                manager.getOrCreatePIDData(pid).initialized = true;
-                manager.getOrCreatePIDData(pid).isNewPID = false;
-                // Remove the PID from the launching map
-                manager.removeLaunchingPID(pid);
-                std::cout << "Initialization complete for PID: " << pid << std::endl;
+                else {
+                    std::cerr << "Failed to initialize process PID: " << pid << std::endl;
+                    manager.removeLaunchingPID(pid);
+                }
                 });
 
             // Detach the thread to allow it to run independently
@@ -238,26 +291,26 @@ export namespace wow_start {
 
             // Start the monitoring in a separate thread
             std::thread monitorThread([pid, accountNumber, email, additionalArgs, relog, &manager]() {
-                // Wait for initialization to complete
                 while (!manager.getOrCreatePIDData(pid).initialized) {
                     std::this_thread::sleep_for(std::chrono::seconds(1));
                 }
                 while (true) {
                     if (!manager.getOrCreatePIDData(pid).relog || !isProcessRunning(pid)) {
-                        // If relog is false or process is not running, break out of the loop
                         break;
                     }
-                    // Begin monitoring
                     monitorAndRelog(pid, accountNumber, email, additionalArgs, relog);
                 }
-                
                 });
+
             monitorThread.detach();
         }
         else {
-            std::cout << "Failed to create process. Error Code: " << GetLastError() << std::endl;
+            std::cerr << "Failed to create process. Error Code: " << GetLastError() << std::endl;
         }
+
+        // Close the handles even if CreateProcess fails
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
     }
-    
-    // Additional utility functions if needed
+
 }

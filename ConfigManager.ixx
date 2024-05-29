@@ -1,7 +1,7 @@
 #include <fstream>
 #include <string>
 #include <sstream>
-
+#include <vector>
 export module ConfigManager;
 
 export class ConfigManager {
@@ -26,9 +26,26 @@ public:
     }
 
     void SetAccountCheckbox(int index, bool value) {
-        // This is a simplified example. In a real application, you would likely want to read all the values into memory, update the one you're interested in, and then write all the values back out.
-        std::ofstream config_file(filename_, std::ios_base::app); // Append mode
-        config_file << "Account" << (index + 1) << "=" << (value ? "true" : "false") << "\n";
+        std::vector<std::string> lines;
+        std::string line;
+        std::ifstream config_file_read(filename_);
+        while (std::getline(config_file_read, line)) {
+            lines.push_back(line);
+        }
+        config_file_read.close();
+
+        // Update the specific line
+        if (index < lines.size()) {
+            std::ostringstream oss;
+            oss << "Account" << (index + 1) << "=" << (value ? "true" : "false");
+            lines[index] = oss.str();
+        }
+
+        // Write everything back
+        std::ofstream config_file_write(filename_, std::ios::out | std::ios::trunc); // Overwrite mode
+        for (const auto& each_line : lines) {
+            config_file_write << each_line << "\n";
+        }
     }
 
 private:
