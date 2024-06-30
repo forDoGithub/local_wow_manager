@@ -1,82 +1,59 @@
 #include "framework.h"
-#include <tlhelp32.h>s
+#include <tlhelp32.h>
 #include <tchar.h>
 #include <psapi.h>
 #pragma comment(lib, "psapi")
 import pid_data_manager;
-// wow_starter.ixx
+import mmap;
 export module wow_start;
-
 // CONSTANTS
-//const std::wstring app_path = LR"(C:\Users\pc\Desktop\wow1\_classic_era_\)";
-//const std::wstring app_path = LR"(C:\Program Files (x86)\World of Warcraft\_classic_era_\)"; 
 const std::wstring app_path = LR"(C:\Program Files (x86)\World of Warcraft\_retail_\)";
-//const std::wstring common = L"common.dll";
 const std::wstring app_name = L"Wow.exe";
-const std::wstring dll_name = L"tetra.dll";
+const std::wstring dll_name = L"Discord.dll";
 
 // WINDOW CALLBACK
 BOOL CALLBACK callback(HWND hwnd, LPARAM lParam)
 {
-	auto& window = *reinterpret_cast<std::tuple<HWND, DWORD>*>(lParam);
+    auto& window = *reinterpret_cast<std::tuple<HWND, DWORD>*>(lParam);
 
-	DWORD pid;
-	GetWindowThreadProcessId(hwnd, &pid);
+    DWORD pid;
+    GetWindowThreadProcessId(hwnd, &pid);
 
-	auto& [h, p] = window;
-	if (pid == p)
-		h = hwnd;
+    auto& [h, p] = window;
+    if (pid == p)
+        h = hwnd;
 
-	return TRUE;
+    return TRUE;
 }
 
 // WINDOW HANDLE
 HWND window(DWORD pid)
 {
-	std::tuple<HWND, DWORD> window{};
-	auto& [h, p] = window;
-	p = pid;
+    std::tuple<HWND, DWORD> window{};
+    auto& [h, p] = window;
+    p = pid;
 
-	EnumWindows(callback, reinterpret_cast<LPARAM>(&window));
+    EnumWindows(callback, reinterpret_cast<LPARAM>(&window));
 
-	if (h)
-		return h;
+    if (h)
+        return h;
 
-	return nullptr;
+    return nullptr;
 }
 
-// LOAD MODULE
-int load(DWORD pid, const wchar_t* path)
+// NEW LOAD MODULE USING MM CLASS
+int load_new(DWORD pid, const std::wstring& path)
 {
-	auto sz_dll = (wcslen(path) + 1) * sizeof(wchar_t);
-	auto process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-	auto dll = VirtualAllocEx(process, nullptr, sz_dll, MEM_COMMIT, PAGE_READWRITE);
+    HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (!process)
+        return -1;
 
-	if (!dll)
-		return -1;
+    mm module(process, pid);
+    module.map_dll(path.c_str());
 
-	WriteProcessMemory(process, dll, path, sz_dll, nullptr);
-
-	auto kernel32 = GetModuleHandle(L"Kernel32.dll");
-
-	if (!kernel32)
-		return -1;
-
-	auto load_library = (LPTHREAD_START_ROUTINE)(GetProcAddress(kernel32, "LoadLibraryW"));
-
-	if (!load_library)
-		return -1;
-
-	HANDLE thread = CreateRemoteThread(process, nullptr, 0, load_library, dll, 0, nullptr);
-
-	if (!thread)
-		return -1;
-	WaitForSingleObject(thread, INFINITE);
-	VirtualFreeEx(process, dll, sz_dll, MEM_FREE);
     CloseHandle(process);
-    CloseHandle(thread);
 
-	return 0;
+    return 0;
 }
 
 bool waitForWindow(DWORD pid, int timeout_ms) {
@@ -90,7 +67,7 @@ bool waitForWindow(DWORD pid, int timeout_ms) {
     return false;  // Timeout
 }
 
-// DETECT GUI
+// DETECT GUI AND INJECT DLL
 int initialize(DWORD pid, int timeout_ms = 30000) {
     HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
     if (!process) {
@@ -102,8 +79,7 @@ int initialize(DWORD pid, int timeout_ms = 30000) {
 
     if (waitResult == 0) {  // The process is idle, meaning it has finished initialization
         if (waitForWindow(pid, timeout_ms)) {  // Ensure the window is created
-            load(pid, std::filesystem::current_path().append(dll_name).c_str());
-            return 0;
+            return load_new(pid, std::filesystem::current_path().append(dll_name).c_str());
         }
     }
     return 1;  // Timeout or error
@@ -111,27 +87,28 @@ int initialize(DWORD pid, int timeout_ms = 30000) {
 
 export namespace wow_start {
 
-	std::vector<std::string> ReadAccountEmails(const std::string& iniFilePath) {
-		std::vector<std::string> emails;
-		std::ifstream inFile(iniFilePath);
+    std::vector<std::string> ReadAccountEmails(const std::string& iniFilePath) {
+        std::vector<std::string> emails;
+        std::ifstream inFile(iniFilePath);
 
-		std::string line;
-		while (std::getline(inFile, line)) {
-			if (line.substr(0, 6) == "email=") { // Check if the line starts with "email="
-				emails.push_back(line.substr(6)); // Add the part after "email=" to the vector
-				std::cout << line.substr(6);
-			}
-		}
+        std::string line;
+        while (std::getline(inFile, line)) {
+            if (line.substr(0, 6) == "email=") { // Check if the line starts with "email="
+                emails.push_back(line.substr(6)); // Add the part after "email=" to the vector
+                std::cout << line.substr(6);
+            }
+        }
 
-		return emails;
-	}
+        return emails;
+    }
+
     bool isProcessRunning(DWORD pid) {
         HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
         DWORD ret = WaitForSingleObject(process, 0);
         CloseHandle(process);
         return ret == WAIT_TIMEOUT;
     }
-    
+
     void stopProcess(DWORD pid) {
         // Open a handle to the process
         HANDLE processHandle = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
@@ -184,9 +161,8 @@ export namespace wow_start {
             }
         }
     }
+
     void LaunchAccount(int accountNumber, const std::string& email, const std::string& additionalArgs, bool relog);
-
-
 
     void monitorAndRelog(DWORD pid, int accountNumber, const std::string& email, const std::string& additionalArgs = "", bool relog = false) {
         while (true) {
@@ -200,11 +176,12 @@ export namespace wow_start {
                 // Exit the loop since LaunchAccount will handle monitoring for the new process
                 return;
             }
-			CloseBlizzardErrorProcess();
+            CloseBlizzardErrorProcess();
             // Sleep for a specified time before checking again
             Sleep(1000); // Example: 10 seconds
         }
     }
+
     void LaunchAccount(int accountNumber, const std::string& email, const std::string& additionalArgs = "", bool relog = false) {
         // Get the PIDDataManager instance
         PIDDataManager& manager = PIDDataManager::getInstance();

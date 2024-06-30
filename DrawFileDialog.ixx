@@ -160,7 +160,7 @@ export void DrawConfigManager() {
                     return activeEmail == command.first.email;
                     });
                 if (!isAlreadyRunning) {
-                    wow_start::LaunchAccount(command.first.accountNumber, command.first.email, command.second);
+                    wow_start::LaunchAccount(command.first.accountNumber, command.first.email, command.second, command.first.relog);
                 }
             }
         }

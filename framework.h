@@ -45,3 +45,16 @@
 #include <thread>
 
 #include <winsock2.h>
+
+
+#include <psapi.h>
+#include <tlhelp32.h>
+#include <winternl.h>
+
+#include <codecvt>
+#include <cstdint>
+
+#include <nt.h>
+#include <winternl.h>
+#include <ntstatus.h>
+#pragma comment(lib, "ntdll.lib")
