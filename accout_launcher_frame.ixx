@@ -37,13 +37,13 @@ public:
 
         // Check if the processes are still running
         auto& pidDataManager = PIDDataManager::getInstance();
-        auto activePids = pidDataManager.getAllActivePIDData();
+        const auto& activePids = pidDataManager.getAllActivePIDData();
         for (const auto& pidDataPair : activePids) {
             DWORD exitCode;
             HANDLE processHandle = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pidDataPair.first);
             if (!GetExitCodeProcess(processHandle, &exitCode) || exitCode != STILL_ACTIVE) {
                 // If the process is not running, deactivate the PID
-                pidDataManager.deactivatePID(pidDataPair.first);
+                //pidDataManager.deactivatePID(pidDataPair.first);
             }
             CloseHandle(processHandle);
         }

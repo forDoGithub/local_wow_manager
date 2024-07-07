@@ -58,9 +58,9 @@ void cleanup_imgui()
 	if (log_file.is_open()) {
 		const auto& allActivePIDData = PIDDataManager::getInstance().getAllActivePIDData();
 		log_file << "ACTIVE PIDS:\n";
-		for (const auto& pidDataEntry : allActivePIDData) {
-			const PIDData& data = pidDataEntry.second;
-			log_file << "PID: " << pidDataEntry.first << "\n";
+		for (const auto& [pid, dataPtr] : allActivePIDData) {
+			const PIDData& data = *dataPtr;
+			log_file << "PID: " << pid << "\n";
 			log_file << "Start time: " << data.startTime.time_since_epoch().count() << "\n";
 			log_file << "End time: " << data.endTime.time_since_epoch().count() << "\n";
 			std::chrono::duration<double> elapsed_seconds = data.endTime - data.startTime;
@@ -126,9 +126,9 @@ void cleanup_imgui()
 
 		const auto& allOldPIDData = PIDDataManager::getInstance().getAllOldPIDData();
 		log_file << "OLD PIDS:\n";
-		for (const auto& pidDataEntry : allOldPIDData) {
-			const PIDData& data = pidDataEntry.second;
-			log_file << "PID: " << pidDataEntry.first << "\n";
+		for (const auto& [pid, dataPtr] : allOldPIDData) {
+			const PIDData& data = *dataPtr;
+			log_file << "PID: " << pid << "\n";
 			log_file << "Start time: " << data.startTime.time_since_epoch().count() << "\n";
 			log_file << "End time: " << data.endTime.time_since_epoch().count() << "\n";
 			std::chrono::duration<double> elapsed_seconds = data.endTime - data.startTime;

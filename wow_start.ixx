@@ -1,161 +1,133 @@
 #include "framework.h"
-#include <tlhelp32.h>
+#include <tlhelp32.h>s
 #include <tchar.h>
 #include <psapi.h>
 #pragma comment(lib, "psapi")
 import pid_data_manager;
 import mmap;
+import remap;
+import pipes;
+
+// wow_starter.ixx
 export module wow_start;
-// CONSTANTS
+
 const std::wstring app_path = LR"(C:\Program Files (x86)\World of Warcraft\_retail_\)";
 const std::wstring app_name = L"Wow.exe";
 const std::wstring dll_name = L"Discord.dll";
 
-// WINDOW CALLBACK
-BOOL CALLBACK callback(HWND hwnd, LPARAM lParam)
-{
-    auto& window = *reinterpret_cast<std::tuple<HWND, DWORD>*>(lParam);
+std::wstring program_path(const std::wstring& append = L"") {
+    wchar_t buffer[MAX_PATH];
+    DWORD size = GetModuleFileNameW(NULL, buffer, MAX_PATH);
+    if (size != 0) {
+        std::wstring full_path(buffer);
+        size_t pos = full_path.find_last_of(L"\\");
+        if (pos != std::wstring::npos) {
+            return full_path.substr(0, pos) + L"\\" + append;
+        }
+    }
+    return L"";
+}
 
+BOOL CALLBACK callback(HWND hwnd, LPARAM lParam) {
+    auto& window = *reinterpret_cast<std::tuple<HWND, DWORD>*>(lParam);
     DWORD pid;
     GetWindowThreadProcessId(hwnd, &pid);
-
     auto& [h, p] = window;
-    if (pid == p)
-        h = hwnd;
-
+    if (pid == p) h = hwnd;
     return TRUE;
 }
 
-// WINDOW HANDLE
-HWND window(DWORD pid)
-{
+HWND window(DWORD pid) {
     std::tuple<HWND, DWORD> window{};
     auto& [h, p] = window;
     p = pid;
-
     EnumWindows(callback, reinterpret_cast<LPARAM>(&window));
-
-    if (h)
-        return h;
-
-    return nullptr;
-}
-
-// NEW LOAD MODULE USING MM CLASS
-int load_new(DWORD pid, const std::wstring& path)
-{
-    HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!process)
-        return -1;
-
-    mm module(process, pid);
-    module.map_dll(path.c_str());
-
-    CloseHandle(process);
-
-    return 0;
+    return h ? h : nullptr;
 }
 
 bool waitForWindow(DWORD pid, int timeout_ms) {
     auto start_time = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - start_time < std::chrono::milliseconds(timeout_ms)) {
-        if (window(pid)) {
-            return true;
-        }
-        Sleep(100);  // Check every 100 milliseconds
+        if (window(pid)) return true;
+        Sleep(100);
     }
-    return false;  // Timeout
-}
-
-// DETECT GUI AND INJECT DLL
-int initialize(DWORD pid, int timeout_ms = 30000) {
-    HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    if (!process) {
-        return -1;
-    }
-
-    DWORD waitResult = WaitForInputIdle(process, timeout_ms);
-    CloseHandle(process);
-
-    if (waitResult == 0) {  // The process is idle, meaning it has finished initialization
-        if (waitForWindow(pid, timeout_ms)) {  // Ensure the window is created
-            return load_new(pid, std::filesystem::current_path().append(dll_name).c_str());
-        }
-    }
-    return 1;  // Timeout or error
+    return false;
 }
 
 export namespace wow_start {
-
     std::vector<std::string> ReadAccountEmails(const std::string& iniFilePath) {
         std::vector<std::string> emails;
         std::ifstream inFile(iniFilePath);
-
         std::string line;
         while (std::getline(inFile, line)) {
-            if (line.substr(0, 6) == "email=") { // Check if the line starts with "email="
-                emails.push_back(line.substr(6)); // Add the part after "email=" to the vector
+            if (line.substr(0, 6) == "email=") {
+                emails.push_back(line.substr(6));
                 std::cout << line.substr(6);
             }
         }
-
         return emails;
     }
 
     bool isProcessRunning(DWORD pid) {
-        HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
-        DWORD ret = WaitForSingleObject(process, 0);
-        CloseHandle(process);
-        return ret == WAIT_TIMEOUT;
+        HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+        if (process == NULL) {
+            DWORD error = GetLastError();
+            std::cout << "OpenProcess failed for PID " << pid << ". Error: " << error << std::endl;
+            return false;
+        }
+
+        DWORD exitCode;
+        if (GetExitCodeProcess(process, &exitCode)) {
+            CloseHandle(process);
+            if (exitCode == STILL_ACTIVE) {
+                //std::cout << "Process " << pid << " is still active." << std::endl;
+                return true;
+            }
+            else {
+                std::cout << "Process " << pid << " has exited with code: " << exitCode << std::endl;
+                return false;
+            }
+        }
+        else {
+            DWORD error = GetLastError();
+            std::cout << "GetExitCodeProcess failed for PID " << pid << ". Error: " << error << std::endl;
+            CloseHandle(process);
+            return false;
+        }
     }
 
     void stopProcess(DWORD pid) {
-        // Open a handle to the process
         HANDLE processHandle = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
-
         if (processHandle == NULL) {
             std::cerr << "Failed to open process. Error Code: " << GetLastError() << std::endl;
             return;
         }
-
-        // Terminate the process
         if (!TerminateProcess(processHandle, 1)) {
             std::cerr << "Failed to terminate process. Error Code: " << GetLastError() << std::endl;
         }
-
-        // Close the handle to the process
         CloseHandle(processHandle);
     }
 
     void CloseBlizzardErrorProcess() {
         DWORD aProcesses[1024], cbNeeded, cProcesses;
         unsigned int i;
-
         if (!EnumProcesses(aProcesses, sizeof(aProcesses), &cbNeeded)) {
-            // Failed to enumerate processes
             return;
         }
-
         cProcesses = cbNeeded / sizeof(DWORD);
-
         for (i = 0; i < cProcesses; i++) {
             if (aProcesses[i] != 0) {
                 TCHAR szProcessName[MAX_PATH] = TEXT("<unknown>");
                 HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_TERMINATE, FALSE, aProcesses[i]);
-
                 if (hProcess != NULL) {
                     HMODULE hMod;
                     DWORD cbNeeded;
-
                     if (EnumProcessModules(hProcess, &hMod, sizeof(hMod), &cbNeeded)) {
                         GetModuleBaseName(hProcess, hMod, szProcessName, sizeof(szProcessName) / sizeof(TCHAR));
                     }
-
-                    // If a process with the name "BlizzardError" exists, terminate it
                     if (_tcscmp(szProcessName, TEXT("BlizzardError.exe")) == 0) {
                         TerminateProcess(hProcess, 0);
                     }
-
                     CloseHandle(hProcess);
                 }
             }
@@ -164,130 +136,161 @@ export namespace wow_start {
 
     void LaunchAccount(int accountNumber, const std::string& email, const std::string& additionalArgs, bool relog);
 
-    void monitorAndRelog(DWORD pid, int accountNumber, const std::string& email, const std::string& additionalArgs = "", bool relog = false) {
+    void monitorAndRelog(DWORD pid, int accountNumber, const std::string& email, const std::string& additionalArgs, bool relog) {
+        PIDDataManager& manager = PIDDataManager::getInstance();
+        const int CHECK_INTERVAL_MS = 1000; // Check every second
+        const int MAX_INIT_TIME_MS = 30000; // Maximum initialization time (30 seconds)
+        int initTime = 0;
+
         while (true) {
-            // Check if process is still running
-            if (!isProcessRunning(pid)) {
-                std::cout << "Process " << pid << " has exited. Attempting to restart." << std::endl;
-
-                // Launch the game again for the same account
-                LaunchAccount(accountNumber, email, additionalArgs, relog);
-
-                // Exit the loop since LaunchAccount will handle monitoring for the new process
+            PIDData* pidDataPtr = manager.getPIDData(pid);
+            if (!pidDataPtr) {
+                std::cout << "PID " << pid << " not found in manager. Exiting monitor." << std::endl;
                 return;
             }
-            CloseBlizzardErrorProcess();
-            // Sleep for a specified time before checking again
-            Sleep(1000); // Example: 10 seconds
-        }
-    }
 
-    void LaunchAccount(int accountNumber, const std::string& email, const std::string& additionalArgs = "", bool relog = false) {
-        // Get the PIDDataManager instance
-        PIDDataManager& manager = PIDDataManager::getInstance();
+            bool isRunning = isProcessRunning(pid);
+            //std::cout << "Checking PID " << pid << ". IsRunning: " << (isRunning ? "Yes" : "No") << std::endl;
 
-        // Check if there's a launching PID for this account
-        const auto& allLaunchingPIDData = manager.getAllLaunchingPIDData();
-        for (const auto& pidDataEntry : allLaunchingPIDData) {
-            if (pidDataEntry.second.accountNumber == accountNumber) {
-                auto now = std::chrono::system_clock::now();
-                auto launchTime = pidDataEntry.second.startTime;
-                auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - launchTime);
+            if (!isRunning) {
+                std::cout << "Process " << pid << " for account " << accountNumber << " has exited." << std::endl;
 
-                if (duration.count() > 5) {
-                    std::cout << "PID LAUNCH TIMES OUT AT 5 s!!!! starting the same agaiiiiin!!!" << std::endl;
-
-                    // Stop the current process
-                    stopProcess(pidDataEntry.first);
-
-                    // Remove the PID from the launching map
-                    manager.removeLaunchingPID(pidDataEntry.first);
-
-                    // Start the process again
-                    LaunchAccount(accountNumber, email, additionalArgs, relog);
-                    return;
+                {
+                    std::lock_guard<std::mutex> lock(*pidDataPtr->mtx);
+                    pidDataPtr->running = false;
                 }
-                else {
-                    // If the PID is still launching and hasn't timed out, don't start another one
-                    return;
+
+                // Remove the old PID data
+                manager.removePIDData(pid);
+
+                // Only relaunch if relog is true
+                if (relog) {
+                    std::cout << "Attempting to restart account " << accountNumber << " after 5 seconds." << std::endl;
+                    std::this_thread::sleep_for(std::chrono::seconds(5));
+                    LaunchAccount(accountNumber, email, additionalArgs, relog);
+                }
+                return; // Exit this monitor thread
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(*pidDataPtr->mtx);
+                if (!pidDataPtr->initialized) {
+                    initTime += CHECK_INTERVAL_MS;
+                    if (initTime >= MAX_INIT_TIME_MS) {
+                        std::cout << "Initialization timed out for PID: " << pid << std::endl;
+                        manager.removeLaunchingPID(pid);
+                        pidDataPtr->initialized = true;  // Consider it initialized to avoid getting stuck
+                    }
                 }
             }
+
+            CloseBlizzardErrorProcess();
+            std::this_thread::sleep_for(std::chrono::milliseconds(CHECK_INTERVAL_MS));
         }
+    }
+   
+    void LaunchAccount(int accountNumber, const std::string& email, const std::string& additionalArgs, bool relog) {
+        PIDDataManager& manager = PIDDataManager::getInstance();
+        const auto& allActivePIDData = manager.getAllActivePIDData();
+        const auto& allLaunchingPIDData = manager.getAllLaunchingPIDData();
+
+        static std::mutex launchMutex;
+        std::lock_guard<std::mutex> lock(launchMutex);
 
         std::cout << "Launching account with email: " << email << std::endl;
         std::cout << "Additional arguments: " << additionalArgs << std::endl;
-
-        STARTUPINFO si = { sizeof(si) };
-        PROCESS_INFORMATION pi;
-        DWORD flags = CREATE_SUSPENDED;
-
-        auto path = app_path + app_name;
+        std::wstring app_path_w(app_path.begin(), app_path.end());
+        std::wstring app_name_w(app_name.begin(), app_name.end());
+        auto process_path = app_path_w + app_name_w;
+        STARTUPINFOW si = { sizeof(si) };
+        PROCESS_INFORMATION pi = { 0 };
+        DWORD flags = DETACHED_PROCESS;
         std::wstringstream cmdLineStream;
-        cmdLineStream << L"\"" << path << L"\" " << std::wstring(additionalArgs.begin(), additionalArgs.end());
+        cmdLineStream << L"\"" << process_path << L"\" " << std::wstring(additionalArgs.begin(), additionalArgs.end());
         std::wstring cmdLine = cmdLineStream.str();
-
         std::cout << "Attempting to create process with command line: " << std::string(cmdLine.begin(), cmdLine.end()) << std::endl;
 
-        BOOL success = CreateProcess(NULL, &cmdLine[0], NULL, NULL, FALSE, flags, NULL, app_path.c_str(), &si, &pi);
+        if (!CreateProcessW(process_path.c_str(), &cmdLine[0], nullptr, nullptr, FALSE, flags, nullptr, app_path_w.c_str(), &si, &pi)) {
+            std::cerr << "Failed to create process. Error Code: " << GetLastError() << std::endl;
+            return;
+        }
 
-        if (success) {
-            std::cout << "Process created successfully. PID: " << pi.dwProcessId << std::endl;
+        DWORD pid = pi.dwProcessId;
+        std::cout << "Process created successfully. PID: " << pid << std::endl;
 
-            DWORD pid = pi.dwProcessId;
-            // Mark the PID as created but not initialized in PIDDataManager
+        auto pidData = std::make_unique<PIDData>();
+        pidData->pid = pid;
+        pidData->relog = relog;
+        pidData->c_init = false;
+        pidData->isNewPID = true;
+        pidData->accountNumber = accountNumber;
+        pidData->accountEmail = email;
+        pidData->running = true;
+        pidData->initialized = false;
+        pidData->startTime = std::chrono::system_clock::now();
+        manager.updatePIDData(pid, std::move(pidData));
+        manager.addLaunchingPID(pid);
+
+        std::thread initThread([&manager, pid, &pi]() {
+            std::cout << "Waiting for process to initialize... PID: " << pid << std::endl;
+            HANDLE processHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+            if (processHandle == NULL) {
+                std::cerr << "Failed to open process handle for PID: " << pid << ". Error Code: " << GetLastError() << std::endl;
+                return;
+            }
+
+            DWORD waitResult = WaitForInputIdle(processHandle, 15000);
+            CloseHandle(processHandle);
+
             auto& pidData = manager.getOrCreatePIDData(pid);
-            pidData.relog = relog;
-            pidData.c_init = false;
-            pidData.isNewPID = true;
-            pidData.accountNumber = accountNumber;
-            pidData.accountEmail = email;  // Set the account email
-            // Add the PID to the launching map
-            manager.addLaunchingPID(pid);
-            ResumeThread(pi.hThread);
+            std::lock_guard<std::mutex> lock(*pidData.mtx);
+            pidData.initialized = true;
+            std::cout << "Process initialized successfully for PID: " << pid << std::endl;
+
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);
 
-            // Create a new thread for initializing the process
-            std::thread initThread([pid, &manager]() {
-                if (initialize(pid) == 0) {
-                    // Mark the PID as initialized in PIDDataManager
-                    manager.getOrCreatePIDData(pid).initialized = true;
-                    manager.getOrCreatePIDData(pid).isNewPID = false;
-                    // Remove the PID from the launching map
-                    manager.removeLaunchingPID(pid);
-                    std::cout << "Initialization complete for PID: " << pid << std::endl;
-                }
-                else {
-                    std::cerr << "Failed to initialize process PID: " << pid << std::endl;
-                    manager.removeLaunchingPID(pid);
-                }
-                });
+            pidData.cvInit->notify_one();
+            });
+        initThread.detach();
 
-            // Detach the thread to allow it to run independently
-            initThread.detach();
+        std::thread injectThread([&manager, pid]() {
+            
+            auto& pidData = manager.getOrCreatePIDData(pid);
+            {
+                std::unique_lock<std::mutex> lock(*pidData.mtx);
+                bool initialized = pidData.cvInit->wait_for(lock, std::chrono::seconds(60), [&pidData] { return pidData.initialized || !pidData.running; });
 
-            // Start the monitoring in a separate thread
-            std::thread monitorThread([pid, accountNumber, email, additionalArgs, relog, &manager]() {
-                while (!manager.getOrCreatePIDData(pid).initialized) {
-                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                if (!initialized) {
+                    std::cerr << "Timed out waiting for process to initialize. PID: " << pid << std::endl;
+                    return;
                 }
-                while (true) {
-                    if (!manager.getOrCreatePIDData(pid).relog || !isProcessRunning(pid)) {
-                        break;
-                    }
-                    monitorAndRelog(pid, accountNumber, email, additionalArgs, relog);
-                }
-                });
+            }
 
-            monitorThread.detach();
-        }
-        else {
-            std::cerr << "Failed to create process. Error Code: " << GetLastError() << std::endl;
-        }
+            if (pidData.running && !pidData.changeProtectionDone) {
+                std::cout << "Starting DLL injection for PID: " << pid << std::endl;
+                std::wstring dll_path = program_path(dll_name);
+                mm module(OpenProcess(PROCESS_ALL_ACCESS, FALSE, pidData.pid), pidData.pid);
+                module.map_dll(dll_path.c_str());
+                change_protection(PAGE_EXECUTE_READWRITE);
+                pidData.changeProtectionDone = true;
+                pidData.isNewPID = false;
+                manager.removeLaunchingPID(pidData.pid);
+                std::cout << "DLL injection complete for PID: " << pidData.pid << std::endl;
+            }
 
-        // Close the handles even if CreateProcess fails
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
+            pidData.cvMonitor->notify_one();
+            });
+        injectThread.detach();
+
+        std::thread pipesThread([pid]() {
+            pipes_server(pid);
+            });
+        pipesThread.detach();
+
+        std::thread monitorThread([pid, accountNumber, email, additionalArgs, relog]() {
+            monitorAndRelog(pid, accountNumber, email, additionalArgs, relog);
+            });
+        monitorThread.detach();
     }
-
 }

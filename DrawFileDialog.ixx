@@ -153,7 +153,7 @@ export void DrawConfigManager() {
     if (!wowstart_commands.empty()) {
         if (ImGui::Button("Start All")) {
             auto& pidDataManager = PIDDataManager::getInstance();
-            auto activePids = pidDataManager.getAllActivePIDData();
+            const auto& activePids = pidDataManager.getAllActivePIDData();
             for (const auto& command : wowstart_commands) {
                 bool isAlreadyRunning = std::any_of(activePids.begin(), activePids.end(), [&](const auto& pidDataPair) {
                     auto activeEmail = pidDataManager.getAccountEmail(pidDataPair.first);

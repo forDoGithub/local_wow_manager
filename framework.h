@@ -7,10 +7,10 @@
 #include <iostream>
 #include <fstream>
 // DETOUR
-//#include "detourCommon.h"
-//#include "detourNavMesh.h"
-//#include "detourNavMeshQuery.h"
-//#pragma comment(lib, "detour.lib")
+#include "detourCommon.h"
+#include "detourNavMesh.h"
+#include "detourNavMeshQuery.h"
+#pragma comment(lib, "detour.lib")
 
 // OPENSSL
 #include <openssl/ssl.h>
@@ -58,3 +58,7 @@
 #include <winternl.h>
 #include <ntstatus.h>
 #pragma comment(lib, "ntdll.lib")
+
+#include <vector.h>
+
+#include <algorithm>;
