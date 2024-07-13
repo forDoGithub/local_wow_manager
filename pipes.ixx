@@ -5,7 +5,13 @@ import remap;
 export module pipes;
 
 
-void handle_client(HANDLE hPipe) {
+void handle_client(HANDLE hPipe, DWORD pid) {
+    PIDDataManager& manager = PIDDataManager::getInstance();
+    auto& pidData = manager.getOrCreatePIDData(pid);
+
+    // Test cout to verify access to pidData.relog
+    std::wcout << L"PID " << pid << L" relog status: " << (pidData.relog ? L"true" : L"false") << std::endl;
+
     wchar_t buffer[512]{};
     DWORD dwRead;
     while (ReadFile(hPipe, buffer, sizeof(buffer) - sizeof(wchar_t), &dwRead, NULL) != FALSE) {
@@ -18,7 +24,9 @@ void handle_client(HANDLE hPipe) {
         else if (received_msg == L"_restore") {
             change_protection(PAGE_EXECUTE_READ);
         }
+        // Add any other message handling here
     }
+
     DWORD lastError = GetLastError();
     if (lastError == ERROR_BROKEN_PIPE) {
         std::wcout << L"Client disconnected." << std::endl;
@@ -28,10 +36,15 @@ void handle_client(HANDLE hPipe) {
     }
 }
 
-export int pipes_server(DWORD pid) {
+export int pipes_server(DWORD pid, bool relog) {
+    PIDDataManager& manager = PIDDataManager::getInstance();
+    auto& pidData = manager.getOrCreatePIDData(pid);
+
     std::wstringstream ss;
     ss << L"\\\\.\\pipe\\tetra_" << pid;
     std::wstring pipe_name = ss.str();
+
+    bool initial_connection = true;  // Flag to track initial connection
 
     while (true) {
         HANDLE hPipe = CreateNamedPipe(
@@ -54,8 +67,22 @@ export int pipes_server(DWORD pid) {
         BOOL connected = ConnectNamedPipe(hPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
 
         if (connected) {
-            std::wcout << L"Client connected on pipe " << pipe_name << L". Waiting for messages..." << std::endl;
-            handle_client(hPipe);
+            std::wcout << L"Client connected on pipe " << pipe_name << L"." << std::endl;
+
+            // Check if this is the initial connection and relog is true
+            if (initial_connection && relog) {
+                const wchar_t* message = L"relog";
+                DWORD bytesWritten;
+                if (!WriteFile(hPipe, message, wcslen(message) * sizeof(wchar_t), &bytesWritten, NULL)) {
+                    std::wcerr << L"Failed to send initial relog message. Error code: " << GetLastError() << std::endl;
+                }
+                else {
+                    std::wcout << L"Sent initial relog message to client." << std::endl;
+                }
+                initial_connection = false;  // Reset the flag after sending the message
+            }
+
+            handle_client(hPipe, pid);
         }
         else {
             std::wcerr << L"Failed to connect to client on pipe " << pipe_name << L". Error code: " << GetLastError() << std::endl;

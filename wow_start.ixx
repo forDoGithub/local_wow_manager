@@ -136,21 +136,42 @@ export namespace wow_start {
 
     void LaunchAccount(int accountNumber, const std::string& email, const std::string& additionalArgs, bool relog);
 
-    void monitorAndRelog(DWORD pid, int accountNumber, const std::string& email, const std::string& additionalArgs, bool relog) {
+    void monitorAndRelog(int accountNumber, const std::string& email, const std::string& additionalArgs, bool relog) {
         PIDDataManager& manager = PIDDataManager::getInstance();
         const int CHECK_INTERVAL_MS = 1000; // Check every second
         const int MAX_INIT_TIME_MS = 30000; // Maximum initialization time (30 seconds)
         int initTime = 0;
 
         while (true) {
+            DWORD pid = manager.getPIDForAccountNumber(accountNumber);
+            if (pid == 0) {
+                std::cout << "Account " << accountNumber << " not found in manager. Attempting to relaunch." << std::endl;
+                if (relog) {
+                    LaunchAccount(accountNumber, email, additionalArgs, relog);
+                }
+                else {
+                    std::cout << "Relog is disabled for account " << accountNumber << ". Exiting monitor." << std::endl;
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(5)); // Wait before next check
+                continue;
+            }
+
             PIDData* pidDataPtr = manager.getPIDData(pid);
             if (!pidDataPtr) {
-                std::cout << "PID " << pid << " not found in manager. Exiting monitor." << std::endl;
-                return;
+                std::cout << "PID " << pid << " for account " << accountNumber << " not found in manager. Attempting to relaunch." << std::endl;
+                if (relog) {
+                    LaunchAccount(accountNumber, email, additionalArgs, relog);
+                }
+                else {
+                    std::cout << "Relog is disabled for account " << accountNumber << ". Exiting monitor." << std::endl;
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::seconds(5)); // Wait before next check
+                continue;
             }
 
             bool isRunning = isProcessRunning(pid);
-            //std::cout << "Checking PID " << pid << ". IsRunning: " << (isRunning ? "Yes" : "No") << std::endl;
 
             if (!isRunning) {
                 std::cout << "Process " << pid << " for account " << accountNumber << " has exited." << std::endl;
@@ -160,24 +181,24 @@ export namespace wow_start {
                     pidDataPtr->running = false;
                 }
 
-                // Remove the old PID data
                 manager.removePIDData(pid);
 
-                // Only relaunch if relog is true
                 if (relog) {
                     std::cout << "Attempting to restart account " << accountNumber << " after 5 seconds." << std::endl;
                     std::this_thread::sleep_for(std::chrono::seconds(5));
                     LaunchAccount(accountNumber, email, additionalArgs, relog);
                 }
-                return; // Exit this monitor thread
+                else {
+                    std::cout << "Relog is disabled for account " << accountNumber << ". Exiting monitor." << std::endl;
+                    return;
+                }
             }
-
-            {
+            else {
                 std::lock_guard<std::mutex> lock(*pidDataPtr->mtx);
                 if (!pidDataPtr->initialized) {
                     initTime += CHECK_INTERVAL_MS;
                     if (initTime >= MAX_INIT_TIME_MS) {
-                        std::cout << "Initialization timed out for PID: " << pid << std::endl;
+                        std::cout << "Initialization timed out for PID: " << pid << " (Account: " << accountNumber << ")" << std::endl;
                         manager.removeLaunchingPID(pid);
                         pidDataPtr->initialized = true;  // Consider it initialized to avoid getting stuck
                     }
@@ -283,13 +304,13 @@ export namespace wow_start {
             });
         injectThread.detach();
 
-        std::thread pipesThread([pid]() {
-            pipes_server(pid);
+        std::thread pipesThread([pid, relog]() {
+            pipes_server(pid, relog);
             });
         pipesThread.detach();
 
-        std::thread monitorThread([pid, accountNumber, email, additionalArgs, relog]() {
-            monitorAndRelog(pid, accountNumber, email, additionalArgs, relog);
+        std::thread monitorThread([accountNumber, email, additionalArgs, relog]() {
+            monitorAndRelog(accountNumber, email, additionalArgs, relog);
             });
         monitorThread.detach();
     }

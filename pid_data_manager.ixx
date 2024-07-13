@@ -1,7 +1,15 @@
 #include "framework.h"
-
+#include "json_wrapper.h"
 export module pid_data_manager;
 
+export struct AccountConfig {
+    int accountNumber;
+    bool active;
+    std::string characterName;
+    std::string email;
+    bool relog;
+    std::string serverName;
+};
 
 export struct PIDData {
     bool clientConnected = false;
@@ -72,14 +80,18 @@ public:
         return instance;
     }
 
-    PIDData& getOrCreatePIDData(int pid) {
+    PIDData& getOrCreatePIDData(DWORD pid) {
         std::lock_guard<std::mutex> lock(mapMutex);
         auto [it, inserted] = pidDataMap.emplace(pid, std::make_unique<PIDData>());
+        if (inserted) {
+            it->second->pid = pid;
+        }
         return *(it->second);
     }
 
     void updatePIDData(DWORD pid, std::unique_ptr<PIDData> data) {
         std::lock_guard<std::mutex> lock(mapMutex);
+        data->pid = pid; // Ensure the PID is set correctly
         pidDataMap[pid] = std::move(data);
         std::cout << "Updated PID data for PID " << pid << ", Running: " << pidDataMap[pid]->running << std::endl;
     }
@@ -153,6 +165,56 @@ public:
         return nullptr;
     }
 
+    void updatePIDDataFromConfig(const std::vector<AccountConfig>& accounts) {
+        std::lock_guard<std::mutex> lock(mapMutex);
+        for (const auto& account : accounts) {
+            DWORD pid = getPIDForAccountNumber_unsafe(account.accountNumber);
+            if (pid != 0) {
+                auto& pidData = getOrCreatePIDData_unsafe(pid);
+                pidData.relog = account.relog;
+                pidData.accountNumber = account.accountNumber;
+                pidData.accountEmail = account.email;
+                pidData.running = account.active;
+            }
+        }
+    }
+
+    DWORD getPIDForAccountNumber(int accountNumber) {
+        std::lock_guard<std::mutex> lock(mapMutex);
+        for (const auto& [pid, pidData] : pidDataMap) {
+            if (pidData->accountNumber == accountNumber) {
+                return pid;
+            }
+        }
+        return 0; // Return 0 if no matching PID is found
+    }
+    int getAccountNumberForPID(DWORD pid) {
+        std::lock_guard<std::mutex> lock(mapMutex);
+        auto it = pidDataMap.find(pid);
+        if (it != pidDataMap.end()) {
+            return it->second->accountNumber;
+        }
+        return -1; // Return -1 if no matching account number is found
+    }
+
+    void setRelogStatus(DWORD pid, bool relogStatus) {
+        std::lock_guard<std::mutex> lock(mapMutex);
+        auto it = pidDataMap.find(pid);
+        if (it != pidDataMap.end()) {
+            it->second->relog = relogStatus;
+        }
+    }
+
+    bool getRelogStatus(DWORD pid) {
+        std::lock_guard<std::mutex> lock(mapMutex);
+        auto it = pidDataMap.find(pid);
+        if (it != pidDataMap.end()) {
+            return it->second->relog;
+        }
+        return false;
+    }
+
+
 private:
     PIDDataManager() {}
     std::unordered_map<int, std::unique_ptr<PIDData>> pidDataMap;
@@ -162,4 +224,23 @@ private:
 
     PIDDataManager(const PIDDataManager&) = delete;
     PIDDataManager& operator=(const PIDDataManager&) = delete;
+
+    DWORD getPIDForAccountNumber_unsafe(int accountNumber) {
+        // No lock here, assumed to be called from a method that already holds the lock
+        for (const auto& [pid, pidData] : pidDataMap) {
+            if (pidData->accountNumber == accountNumber) {
+                return pid;
+            }
+        }
+        return 0;
+    }
+
+    PIDData& getOrCreatePIDData_unsafe(DWORD pid) {
+        // No lock here, assumed to be called from a method that already holds the lock
+        auto [it, inserted] = pidDataMap.try_emplace(pid, std::make_unique<PIDData>());
+        if (inserted) {
+            it->second->pid = pid;
+        }
+        return *(it->second);
+    }
 };

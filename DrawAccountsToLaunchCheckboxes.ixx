@@ -7,12 +7,20 @@ export bool account_checkboxes_[5] = { false, false, false, false, false };
 
 export module DrawAccountsToLaunchCheckboxes;
 
+
 export void DrawOptionsMenu(ConfigManager& configManager) {
     if (ImGui::BeginPopup("Options")) {
-        for (int i = 0; i < 5; ++i) {
-            if (ImGui::Checkbox(("Account " + std::to_string(i + 1)).c_str(), &account_checkboxes_[i])) {
-                // Update the config when a checkbox is toggled
-                configManager.SetAccountCheckbox(i, account_checkboxes_[i]);
+        const auto& accounts = configManager.GetAccounts();
+        for (const auto& account : accounts) {
+            bool active = account.active;
+            if (ImGui::Checkbox(("Account " + std::to_string(account.accountNumber) + ": " + account.characterName).c_str(), &active)) {
+                configManager.SetAccountCheckbox(account.accountNumber, active);
+            }
+
+            ImGui::SameLine();
+            bool relog = account.relog;
+            if (ImGui::Checkbox(("Relog##" + std::to_string(account.accountNumber)).c_str(), &relog)) {
+                configManager.SetAccountRelog(account.accountNumber, relog);
             }
         }
         ImGui::EndPopup();

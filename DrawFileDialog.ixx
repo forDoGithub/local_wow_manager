@@ -7,7 +7,7 @@
 
 import wow_start;
 import pid_data_manager;
-
+import ConfigManager;
 export module DrawFileDialog;
 struct ConfigAccount {
     int accountNumber;
@@ -101,10 +101,12 @@ void DrawEditorBox() {
 std::vector<std::pair<ConfigAccount, std::string>> wowstart_commands;
 
 
-export void DrawConfigManager() {
-    wowstart_commands.clear();
+export void DrawConfigManager(ConfigManager& configManager) {
+    static ImGui::FileBrowser fileDialog;
+    static std::string currentFile = configManager.GetFilename();
+    static bool showConfigEditBoxPopup = false;
 
-    ImGui::InputText("", &currentFile[0], currentFile.size(), ImGuiInputTextFlags_ReadOnly);
+    ImGui::InputText("Config File", &currentFile[0], currentFile.size(), ImGuiInputTextFlags_ReadOnly);
     ImGui::SameLine();
     if (ImGui::Button("Browse")) {
         fileDialog.Open();
@@ -113,66 +115,117 @@ export void DrawConfigManager() {
     if (fileDialog.HasSelected()) {
         currentFile = fileDialog.GetSelected().string();
         fileDialog.ClearSelected();
-        LoadConfigFile(currentFile);
+        configManager.LoadConfig(currentFile);
     }
-    if (ImGui::Button("Load")) {
-        LoadConfigFile(currentFile);
+    if (ImGui::Button("Reload")) {
+        configManager.LoadConfig(currentFile);
     }
     ImGui::SameLine(0.0f, 10);
     if (ImGui::Button("Edit Config")) {
         showConfigEditBoxPopup = true;
     }
 
-    
-    for (ConfigAccount& account : config_accounts) {
-        bool wasActive = account.active;
-        ImGui::Checkbox(("Account #" + std::to_string(account.accountNumber)).c_str(), &account.active);
-        if (account.active != wasActive) {
-            SaveConfigFile(currentFile);
-            LoadConfigFile(currentFile);
+    const auto& accounts = configManager.GetAccounts();
+    for (const auto& account : accounts) {
+        bool active = account.active;
+        if (ImGui::Checkbox(("Account #" + std::to_string(account.accountNumber) + ": " + account.characterName).c_str(), &active)) {
+            configManager.SetAccountCheckbox(account.accountNumber, active);
         }
-        if (account.active) {
+
+        if (active) {
             ImGui::SameLine(0.0f, 10);
-            std::string buttonLabel = "START # " + std::to_string(account.accountNumber) + " #";
+            std::string buttonLabel = "START #" + std::to_string(account.accountNumber);
             if (ImGui::Button(buttonLabel.c_str())) {
                 wow_start::LaunchAccount(account.accountNumber, account.email, "-config " + account.email + ".wtf", account.relog);
             }
-        
-            // Handle changes in the "Relog" checkbox state
-            bool wasRelog = account.relog;
-            ImGui::SameLine(0.0f, 20); // Add a little space between the button and the checkbox
-            ImGui::Checkbox("Relog", &account.relog); // Render the "Relog" checkbox
-            if (account.relog != wasRelog) {
-                // If the "relog" state changed, save and reload the config
-                SaveConfigFile(currentFile);
-                LoadConfigFile(currentFile);
+
+            bool relog = account.relog;
+            ImGui::SameLine(0.0f, 20);
+            if (ImGui::Checkbox(("Relog##" + std::to_string(account.accountNumber)).c_str(), &relog)) {
+                configManager.SetAccountRelog(account.accountNumber, relog);
             }
-            wowstart_commands.push_back({ account, "-config " + account.email + ".wtf" });
         }
     }
-    if (!wowstart_commands.empty()) {
-        if (ImGui::Button("Start All")) {
-            auto& pidDataManager = PIDDataManager::getInstance();
-            const auto& activePids = pidDataManager.getAllActivePIDData();
-            for (const auto& command : wowstart_commands) {
-                bool isAlreadyRunning = std::any_of(activePids.begin(), activePids.end(), [&](const auto& pidDataPair) {
-                    auto activeEmail = pidDataManager.getAccountEmail(pidDataPair.first);
-                    return activeEmail == command.first.email;
+
+
+    if (ImGui::Button("Start All Active")) {
+        auto& pidDataManager = PIDDataManager::getInstance();
+        const auto& activePids = pidDataManager.getAllActivePIDData();
+        for (const auto& account : accounts) {
+            if (account.active) {
+                bool isAlreadyRunning = std::any_of(activePids.begin(), activePids.end(),
+                    [&](const auto& pidDataPair) {
+                        return pidDataManager.getAccountEmail(pidDataPair.first) == account.email;
                     });
                 if (!isAlreadyRunning) {
-                    wow_start::LaunchAccount(command.first.accountNumber, command.first.email, command.second, command.first.relog);
+                    wow_start::LaunchAccount(account.accountNumber, account.email, "-config " + account.email + ".wtf", account.relog);
                 }
             }
         }
     }
+
     if (showConfigEditBoxPopup) {
-        if (ImGui::Begin("Config Editor", &showConfigEditBoxPopup)) {
-            DrawEditorBox();
-            ImGui::SameLine(0.0f, 10);
-            if (ImGui::Button("Close")) {
-                showConfigEditBoxPopup = false;
+        ImGui::OpenPopup("Config Editor");
+    }
+
+    if (ImGui::BeginPopupModal("Config Editor", &showConfigEditBoxPopup)) {
+        static nlohmann::json configJson;
+        static std::string configText;
+        static bool initialized = false;
+        static char buffer[102400] = ""; // Increased buffer size, adjust as needed
+        static std::string errorMessage;
+
+        if (!initialized) {
+            configText = configManager.GetConfigText();
+            try {
+                configJson = nlohmann::json::parse(configText);
+                configText = configJson.dump(4); // Pretty print with 4 space indent
+                strncpy_s(buffer, configText.c_str(), sizeof(buffer) - 1);
+                errorMessage.clear();
             }
-            ImGui::End();
+            catch (const nlohmann::json::parse_error& e) {
+                errorMessage = "JSON Parse Error: " + std::string(e.what());
+            }
+            initialized = true;
         }
+
+        if (!errorMessage.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), errorMessage.c_str());
+        }
+
+        if (ImGui::InputTextMultiline("##config", buffer, sizeof(buffer), ImVec2(-1, -1))) {
+            configText = buffer;
+            try {
+                configJson = nlohmann::json::parse(configText);
+                errorMessage.clear();
+            }
+            catch (const nlohmann::json::parse_error& e) {
+                errorMessage = "JSON Parse Error: " + std::string(e.what());
+            }
+        }
+
+        if (ImGui::Button("Save")) {
+            if (errorMessage.empty()) {
+                configManager.SetConfigFromText(configJson.dump(4));
+                ImGui::CloseCurrentPopup();
+                initialized = false; // Reset for next time
+            }
+            else {
+                ImGui::OpenPopup("Error");
+            }
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Close")) {
+            ImGui::CloseCurrentPopup();
+            initialized = false; // Reset for next time
+        }
+
+        if (ImGui::BeginPopupModal("Error", NULL, ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::Text("Cannot save invalid JSON. Please correct the errors before saving.");
+            if (ImGui::Button("OK", ImVec2(120, 0))) { ImGui::CloseCurrentPopup(); }
+            ImGui::EndPopup();
+        }
+
+        ImGui::EndPopup();
     }
 }
