@@ -1,5 +1,5 @@
 #pragma once
-
+#define WIN32_LEAN_AND_MEAN
 // STANDARD LIBRARY
 #include <cstdio>
 #include <string>
