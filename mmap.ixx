@@ -15,17 +15,16 @@ public:
 	mem memory;
 	mm(HANDLE process, DWORD pid) : memory(process, pid) {}
 
-	std::uintptr_t map_dll(const wchar_t* dll, int print_pad = 0);
+	std::pair<std::uintptr_t, std::string> map_dll(const wchar_t* dll, int print_pad = 0);
 };
 
-std::uintptr_t mm::map_dll(const wchar_t* dll, int print_pad) {
+std::pair<std::uintptr_t, std::string> mm::map_dll(const wchar_t* dll, int print_pad) {
 	std::ifstream file(dll, std::ios_base::binary);
-
 	if (!file.is_open())
-		Utils::print_and_exit("Invalid dll path");
+		return { 0, "Invalid dll path" };
 
 	if (!memory.validate_handle())
-		Utils::print_and_exit("Failed to get handle to process");
+		return { 0, "Failed to get handle to process" };
 
 	file.seekg(0, file.end);
 	std::size_t file_size = file.tellg();
@@ -37,21 +36,19 @@ std::uintptr_t mm::map_dll(const wchar_t* dll, int print_pad) {
 	IMAGE_DOS_HEADER* dos_header = reinterpret_cast<IMAGE_DOS_HEADER*>(buffer.get());
 	IMAGE_NT_HEADERS* pe_header = reinterpret_cast<IMAGE_NT_HEADERS*>(buffer.get() + dos_header->e_lfanew);
 
-	std::uintptr_t base = memory.virtual_alloc_ex(NULL, pe_header->OptionalHeader.SizeOfImage, MEM_RESERVE, PAGE_READWRITE); //we'll just let virtualalloc choose the address and rebase after
+	std::uintptr_t base = memory.virtual_alloc_ex(NULL, pe_header->OptionalHeader.SizeOfImage, MEM_RESERVE, PAGE_READWRITE);
 	if (!base)
-		return false;
+		return { 0, "Failed to allocate memory for DLL. Error: " + std::to_string(GetLastError()) };
 
-	std::string print_padding = std::string(print_pad, ' ');
-
+	std::string print_padding(print_pad, ' ');
 	std::printf("\n%sMapping: %ls \n", print_padding.c_str(), dll);
 	std::printf("%s[+] Dll Base: 0x%llx \n", print_padding.c_str(), base);
 
 	try {
-		std::unique_ptr<char[]> image = std::make_unique<char[]>(pe_header->OptionalHeader.SizeOfImage); //will do all the base reloc etc in curr process memory and write it at once into target
+		std::unique_ptr<char[]> image = std::make_unique<char[]>(pe_header->OptionalHeader.SizeOfImage);
 		std::size_t image_delta = base - pe_header->OptionalHeader.ImageBase;
 		IMAGE_SECTION_HEADER* section_header = IMAGE_FIRST_SECTION(pe_header);
 
-		//loading the dll into our buffer to make all fixing inside the mapper
 		for (std::size_t i = 0; i < pe_header->FileHeader.NumberOfSections; i++) {
 			std::uintptr_t section_rva = section_header[i].VirtualAddress;
 			std::size_t section_size_disk = section_header[i].SizeOfRawData;
@@ -59,41 +56,42 @@ std::uintptr_t mm::map_dll(const wchar_t* dll, int print_pad) {
 
 			std::uintptr_t dest = memory.virtual_alloc_ex(base + section_rva, section_size_memory, MEM_COMMIT, PAGE_READWRITE);
 			if (!dest)
-				throw std::runtime_error("Something went wrong when trying to allocate memory for the dll");
+				throw std::runtime_error("Failed to allocate memory for section. Error: " + std::to_string(GetLastError()));
 
 			std::memcpy(image.get() + section_rva, buffer.get() + section_header[i].PointerToRawData, section_size_disk);
 		}
 
-
-		this->fix_relocations(image.get(), base, pe_header, section_header, image_delta);
+		if (!this->fix_relocations(image.get(), base, pe_header, section_header, image_delta))
+			throw std::runtime_error("Failed to fix relocations");
 		std::printf("%s[+] Fixed relocations \n", print_padding.c_str());
 
-		this->resolve_imports(memory.process, memory.pid, image.get(), base, pe_header, section_header, print_pad);
+		if (!this->resolve_imports(memory.process, memory.pid, image.get(), base, pe_header, section_header, print_pad))
+			throw std::runtime_error("Failed to resolve imports");
 		std::printf("%s[+] Fixed imports \n", print_padding.c_str());
 
-		this->write_buffer_to_target_process(image.get(), base, pe_header, section_header);
+		if (!this->write_buffer_to_target_process(image.get(), base, pe_header, section_header))
+			throw std::runtime_error("Failed to write buffer to target process");
 		std::printf("%s[+] Dll written into target process memory \n", print_padding.c_str());
 
-		this->call_tls_callbacks(image.get(), base, pe_header, section_header, image_delta);
+		if (!this->call_tls_callbacks(image.get(), base, pe_header, section_header, image_delta))
+			throw std::runtime_error("Failed to call TLS callbacks");
 		std::printf("%s[+] Called DLL_PROCESS_ATTACH TLS callbacks (if there were any)\n", print_padding.c_str());
 
-		this->call_dll_main(image.get(), base, pe_header, section_header);
+		if (!this->call_dll_main(image.get(), base, pe_header, section_header))
+			throw std::runtime_error("Failed to call DllMain");
 		std::printf("%s[+] Called Dll Main into target process \n\n", print_padding.c_str());
 
-		return base;
+		return { base, "" };
 	}
-	catch (std::runtime_error& err) {
+	catch (const std::exception& e) {
 		this->memory.virtual_free_ex(base, MEM_RELEASE);
-		Utils::print_and_exit(err.what());
-		return 0;
+		return { 0, e.what() };
 	}
 	catch (...) {
 		this->memory.virtual_free_ex(base, MEM_RELEASE);
-		Utils::print_and_exit("Unexpected error happened, make sure the dll is valid/not corrupt");
-		return 0;
+		return { 0, "Unexpected error occurred, make sure the dll is valid/not corrupt" };
 	}
 }
-
 bool mm::fix_relocations(char* image, std::uintptr_t base, IMAGE_NT_HEADERS* pe_header, IMAGE_SECTION_HEADER* section_header, std::size_t image_delta) {
 	IMAGE_DATA_DIRECTORY base_reloc_dir = pe_header->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
 	std::size_t offset_to_block_start = 0;
@@ -151,7 +149,11 @@ bool mm::resolve_imports(HANDLE process, DWORD pid, char* image, std::uintptr_t 
 			if (!GetModuleFileName(fn_module_local, dependency_file_path.get(), MAX_PATH))
 				throw std::runtime_error("Failed to get import dependency path for " + module_name);
 
-			fn_module_target = reinterpret_cast<HMODULE>(this->map_dll(dependency_file_path.get(), print_pad + 3));
+			auto [injected_base, error] = this->map_dll(dependency_file_path.get(), print_pad + 3);
+			if (!error.empty()) {
+				throw std::runtime_error("Failed to inject dependency DLL: " + error);
+			}
+			fn_module_target = reinterpret_cast<HMODULE>(injected_base);
 		}
 
 		if (!fn_module_target || !fn_module_local)

@@ -51,94 +51,132 @@ bool read_memory(HANDLE processHandle, LPVOID baseAddress, LPVOID buffer, SIZE_T
 }
 
 DWORD query_protection(HANDLE _process, LPVOID base) {
-    // Query the memory region
     MEMORY_BASIC_INFORMATION mem_info{};
-    SIZE_T bytes_returned{};
-
-    if (_process && VirtualQueryEx(_process, base, &mem_info, sizeof(mem_info)) == 0) {
+    if (VirtualQueryEx(_process, base, &mem_info, sizeof(mem_info)) == 0) {
         std::wcerr << L"VirtualQueryEx failed. Error code: " << GetLastError() << std::endl;
-
-        CloseHandle(_process);
-        return 1;
+        return 0;
     }
-
-    // Print the protection of the memory region
-    DWORD protection = mem_info.Protect;
-
-    return protection;
+    return mem_info.Protect;
 }
 
-void restore_memory(HANDLE _process, LPVOID base, SIZE_T sz_region) {
+bool restore_memory(HANDLE _process, LPVOID base, SIZE_T sz_region) {
     DWORD old_protection;
-
     if (!VirtualProtectEx(_process, base, sz_region, PAGE_EXECUTE_READ, &old_protection)) {
-        native_error("VirtualProtectEx", GetLastError());
+        std::wcerr << L"VirtualProtectEx failed in restore_memory. Error code: " << GetLastError() << std::endl;
+        return false;
     }
+    return true;
 }
 
-void remap_memory(HANDLE _process, LPVOID base, int sz_region) {
-    std::cout << "Allocating memory for copy buffer..." << std::endl;
-
+bool remap_memory(HANDLE _process, LPVOID base, SIZE_T sz_region) {
+    std::wcout << L"Allocating memory for copy buffer..." << std::endl;
     LPVOID allocation = VirtualAllocEx(_process, nullptr, sz_region, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-
-    if (allocation == nullptr)
-        native_error("VirtualAllocEx", GetLastError());
+    if (allocation == nullptr) {
+        std::wcerr << L"VirtualAllocEx failed. Error code: " << GetLastError() << std::endl;
+        return false;
+    }
 
     LPVOID buffer = VirtualAlloc(nullptr, sz_region, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (buffer == nullptr) {
+        std::wcerr << L"VirtualAlloc failed. Error code: " << GetLastError() << std::endl;
+        VirtualFreeEx(_process, allocation, 0, MEM_RELEASE);
+        return false;
+    }
+
     LPVOID buffer_ex = VirtualAllocEx(_process, nullptr, sz_region, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (buffer_ex == nullptr) {
+        std::wcerr << L"VirtualAllocEx failed for buffer_ex. Error code: " << GetLastError() << std::endl;
+        VirtualFree(buffer, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, allocation, 0, MEM_RELEASE);
+        return false;
+    }
 
-    std::cout << "Reading process memory..." << std::endl;
-
-    if (!read_memory(_process, base, buffer, sz_region))
-        native_error("ReadProcessMemory", GetLastError());
+    std::wcout << L"Reading process memory..." << std::endl;
+    if (!ReadProcessMemory(_process, base, buffer, sz_region, nullptr)) {
+        std::wcerr << L"ReadProcessMemory failed. Error code: " << GetLastError() << std::endl;
+        VirtualFree(buffer, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, allocation, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, buffer_ex, 0, MEM_RELEASE);
+        return false;
+    }
 
     HANDLE _section = nullptr;
     LARGE_INTEGER max_section{};
     max_section.QuadPart = sz_region;
 
-    std::cout << "Creating section..." << std::endl;
-
+    std::wcout << L"Creating section..." << std::endl;
     NTSTATUS status = NtCreateSection(&_section, SECTION_ALL_ACCESS, nullptr, &max_section, PAGE_EXECUTE_READWRITE, SEC_COMMIT, nullptr);
-    if (status != STATUS_SUCCESS)
-        native_error("NtCreateSection", status);
+    if (status != STATUS_SUCCESS) {
+        std::wcerr << L"NtCreateSection failed. NTSTATUS: 0x" << std::hex << status << std::endl;
+        VirtualFree(buffer, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, allocation, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, buffer_ex, 0, MEM_RELEASE);
+        return false;
+    }
 
-    std::cout << "Unmapping view of section..." << std::endl;
-
+    std::wcout << L"Unmapping view of section..." << std::endl;
     status = NtUnmapViewOfSection(_process, base);
+    if (status != STATUS_SUCCESS) {
+        std::wcerr << L"NtUnmapViewOfSection failed. NTSTATUS: 0x" << std::hex << status << std::endl;
+        CloseHandle(_section);
+        VirtualFree(buffer, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, allocation, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, buffer_ex, 0, MEM_RELEASE);
+        return false;
+    }
 
-    if (status != STATUS_SUCCESS)
-        native_error("NtUnmapViewOfSection", status);
-
-    std::cout << "Mapping view of section..." << std::endl;
-
+    std::wcout << L"Mapping view of section..." << std::endl;
     LPVOID view_base = base;
     LARGE_INTEGER section_offset = { 0 };
     SIZE_T sz_view = 0;
-
     status = NtMapViewOfSection(_section, _process, &view_base, 0, sz_region, &section_offset, &sz_view, ViewUnmap, 0, PAGE_EXECUTE_READWRITE);
+    if (status != STATUS_SUCCESS) {
+        std::wcerr << L"NtMapViewOfSection failed. NTSTATUS: 0x" << std::hex << status << std::endl;
+        CloseHandle(_section);
+        VirtualFree(buffer, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, allocation, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, buffer_ex, 0, MEM_RELEASE);
+        return false;
+    }
 
-    if (status != STATUS_SUCCESS)
-        native_error("NtMapViewOfSection", status);
-
-    std::cout << "Writing memory back to the updated region..." << std::endl;
-
+    std::wcout << L"Writing memory back to the updated region..." << std::endl;
     SIZE_T bytes_written;
+    if (!WriteProcessMemory(_process, view_base, buffer, sz_view, &bytes_written)) {
+        std::wcerr << L"WriteProcessMemory failed for view_base. Error code: " << GetLastError() << std::endl;
+        NtUnmapViewOfSection(_process, view_base);
+        CloseHandle(_section);
+        VirtualFree(buffer, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, allocation, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, buffer_ex, 0, MEM_RELEASE);
+        return false;
+    }
 
-    if (!WriteProcessMemory(_process, view_base, buffer, (SIZE_T)sz_view, &bytes_written))
-        native_error("WriteProcessMemory", GetLastError());
-
-    if (!WriteProcessMemory(_process, buffer_ex, buffer, (SIZE_T)sz_view, &bytes_written))
-        native_error("WriteProcessMemory", GetLastError());
+    if (!WriteProcessMemory(_process, buffer_ex, buffer, sz_view, &bytes_written)) {
+        std::wcerr << L"WriteProcessMemory failed for buffer_ex. Error code: " << GetLastError() << std::endl;
+        NtUnmapViewOfSection(_process, view_base);
+        CloseHandle(_section);
+        VirtualFree(buffer, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, allocation, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, buffer_ex, 0, MEM_RELEASE);
+        return false;
+    }
 
     DWORD old_protection;
+    if (!VirtualProtectEx(_process, buffer_ex, sz_view, PAGE_EXECUTE_READWRITE, &old_protection)) {
+        std::wcerr << L"VirtualProtectEx failed. Error code: " << GetLastError() << std::endl;
+        NtUnmapViewOfSection(_process, view_base);
+        CloseHandle(_section);
+        VirtualFree(buffer, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, allocation, 0, MEM_RELEASE);
+        VirtualFreeEx(_process, buffer_ex, 0, MEM_RELEASE);
+        return false;
+    }
 
-    if (!VirtualProtectEx(_process, buffer_ex, (SIZE_T)sz_view, PAGE_EXECUTE_READWRITE, &old_protection))
-        native_error("VirtualProtectEx", GetLastError());
-
-    if (!VirtualFree(buffer, 0, MEM_RELEASE))
-        native_error("VirtualFree", GetLastError());
-
+    VirtualFree(buffer, 0, MEM_RELEASE);
+    VirtualFreeEx(_process, allocation, 0, MEM_RELEASE);
     CloseHandle(_section);
+
+    return true;
 }
 
 LPVOID base_address(HANDLE process)
@@ -155,69 +193,102 @@ LPVOID base_address(HANDLE process)
 }
 
 export int change_protection(DWORD protection) {
+    std::wcout << L"[DEBUG] Entering change_protection function. Requested protection: " << protection << std::endl;
+
     std::wcout << L"Creating process snapshot..." << std::endl;
-
     PROCESSENTRY32W pe32{};
-    HANDLE _snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     pe32.dwSize = sizeof(PROCESSENTRY32W);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        std::wcerr << L"CreateToolhelp32Snapshot failed. Error code: " << GetLastError() << std::endl;
+        return 1;
+    }
 
-    if (_snapshot == INVALID_HANDLE_VALUE)
-        native_error("CreateToolhelp32Snapshot", GetLastError());
+    HANDLE process = nullptr;
+    if (Process32FirstW(snapshot, &pe32)) {
+        do {
+            if (wcscmp(pe32.szExeFile, L"Wow.exe") == 0) {
+                process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pe32.th32ProcessID);
+                if (process == nullptr) {
+                    std::wcerr << L"OpenProcess failed. Error code: " << GetLastError() << std::endl;
+                    CloseHandle(snapshot);
+                    return 1;
+                }
+                break;
+            }
+        } while (Process32NextW(snapshot, &pe32));
+    }
+    CloseHandle(snapshot);
 
-    Process32FirstW(_snapshot, &pe32);
+    if (process == nullptr) {
+        std::wcerr << L"Failed to find Wow.exe process." << std::endl;
+        return 1;
+    }
 
-    HANDLE _process = nullptr;
-
-    do {
-        if (wcscmp(pe32.szExeFile, L"Wow.exe") == 0) {
-            _process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pe32.th32ProcessID);
-            break;
-        }
-    } while (Process32NextW(_snapshot, &pe32));
-
-    if (_snapshot)
-        CloseHandle(_snapshot);
-
-    if (_process == nullptr)
-        native_error("OpenProcess", GetLastError());
+    LPVOID base = base_address(process);
+    if (base == nullptr) {
+        std::wcerr << L"Failed to get base address of the process." << std::endl;
+        CloseHandle(process);
+        return 1;
+    }
 
     MEMORY_BASIC_INFORMATION basicInformation{};
-    LPVOID base;
-    SIZE_T sz_region;
-
     std::wcout << L"Querying process memory..." << std::endl;
+    if (VirtualQueryEx(process, base, &basicInformation, sizeof(MEMORY_BASIC_INFORMATION)) == 0) {
+        std::wcerr << L"VirtualQueryEx failed. Error code: " << GetLastError() << std::endl;
+        CloseHandle(process);
+        return 1;
+    }
 
-    if (_process && VirtualQueryEx(_process, base_address(_process), &basicInformation, sizeof(MEMORY_BASIC_INFORMATION)) == 0)
-        native_error("VirtualQueryEx", GetLastError());
-
-    base = basicInformation.BaseAddress;
-    sz_region = basicInformation.RegionSize;
+    SIZE_T sz_region = basicInformation.RegionSize;
+    std::wcout << L"Current protection: " << basicInformation.Protect << std::endl;
 
     std::wcout << L"Suspending process..." << std::endl;
+    NTSTATUS status = NtSuspendProcess(process);
+    if (status != STATUS_SUCCESS) {
+        std::wcerr << L"NtSuspendProcess failed. NTSTATUS: 0x" << std::hex << status << std::endl;
+        CloseHandle(process);
+        return 1;
+    }
 
-    NTSTATUS status = NtSuspendProcess(_process);
+    bool operation_success = false;
+    if (protection == PAGE_EXECUTE_READWRITE) {
+        operation_success = remap_memory(process, base, sz_region);
+    }
+    else if (protection == PAGE_EXECUTE_READ) {
+        operation_success = restore_memory(process, base, sz_region);
+    }
 
-    if (status != STATUS_SUCCESS)
-        native_error("NtSuspendProcess", status);
-
-    if (protection == PAGE_EXECUTE_READWRITE)
-        remap_memory(_process, base, (int)sz_region);
-    else if (protection == PAGE_EXECUTE_READ)
-        restore_memory(_process, base, (int)sz_region);
+    if (!operation_success) {
+        std::wcerr << L"Failed to change memory protection." << std::endl;
+        NtResumeProcess(process);
+        CloseHandle(process);
+        return 1;
+    }
 
     std::wcout << L"Resuming process..." << std::endl;
+    status = NtResumeProcess(process);
+    if (status != STATUS_SUCCESS) {
+        std::wcerr << L"NtResumeProcess failed. NTSTATUS: 0x" << std::hex << status << std::endl;
+        CloseHandle(process);
+        return 1;
+    }
 
-    status = NtResumeProcess(_process);
+    DWORD new_protection = query_protection(process, base);
+    std::wcout << L"New protection of the memory region: " << new_protection << std::endl;
 
-    if (status != STATUS_SUCCESS)
-        native_error("NtResumeProcess", status);
+    CloseHandle(process);
 
-    std::wcout << L"Protection of the memory region: " << query_protection(_process, base) << std::endl;
 
-    // Close the process handle
-    CloseHandle(_process);
-
-    std::wcout << L"Operation completed successfully." << std::endl;
-
-    return 0;
+    if ((protection == PAGE_EXECUTE_READWRITE && new_protection == PAGE_EXECUTE_READWRITE) ||
+        (protection == PAGE_EXECUTE_READ && new_protection == PAGE_EXECUTE_READ)) {
+        std::wcout << L"[DEBUG] Operation completed successfully. New protection: " << new_protection
+            << L", Desired protection: " << protection << std::endl;
+        return 0;  // Success
+    }
+    else {
+        std::wcerr << L"[DEBUG] Failed to change memory protection. Current protection: " << new_protection
+            << L", Desired protection: " << protection << std::endl;
+        return 1;  // Failure
+    }
 }
