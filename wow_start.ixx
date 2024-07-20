@@ -3,6 +3,8 @@
 #include <tchar.h>
 #include <psapi.h>
 #include <future>
+#include <memory>
+#include <functional>
 #pragma comment(lib, "psapi")
 import pid_data_manager;
 import mmap;
@@ -142,96 +144,84 @@ export namespace wow_start {
     void monitorAndRelog(int accountNumber, const std::string& email, const std::string& additionalArgs, bool relog) {
         PIDDataManager& manager = PIDDataManager::getInstance();
         const int CHECK_INTERVAL_MS = 1000;
+        const int LAUNCH_GRACE_PERIOD_MS = 60000; // 1 minute grace period for launching
         const int MAX_INIT_TIME_MS = 30000;
         const int COOLDOWN_PERIOD_MS = 5000;
         const int MAX_RELAUNCH_ATTEMPTS = 5;
         const int RAPID_RESTART_THRESHOLD_MS = 300000;
 
-        int initTime = 0;
         int relaunchAttempts = 0;
         std::chrono::steady_clock::time_point lastLaunchTime = std::chrono::steady_clock::now();
+        bool launchInProgress = false;
 
         while (true) {
             DWORD pid = manager.getPIDForAccountNumber(accountNumber);
+
             if (pid == 0) {
-                std::cout << "Account " << accountNumber << " not found in manager." << std::endl;
-                if (relog && relaunchAttempts < MAX_RELAUNCH_ATTEMPTS) {
-                    auto now = std::chrono::steady_clock::now();
-                    auto timeSinceLastLaunch = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastLaunchTime).count();
+                if (!launchInProgress) {
+                    std::cout << "Account " << accountNumber << " not found in manager." << std::endl;
 
-                    if (timeSinceLastLaunch < RAPID_RESTART_THRESHOLD_MS) {
-                        std::cout << "Rapid restarts detected. Waiting for cooldown period." << std::endl;
-                        std::this_thread::sleep_for(std::chrono::milliseconds(COOLDOWN_PERIOD_MS));
+                    if (relog && relaunchAttempts < MAX_RELAUNCH_ATTEMPTS) {
+                        auto now = std::chrono::steady_clock::now();
+                        auto timeSinceLastLaunch = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastLaunchTime).count();
+
+                        if (timeSinceLastLaunch < RAPID_RESTART_THRESHOLD_MS) {
+                            std::cout << "Rapid restarts detected. Waiting for cooldown period." << std::endl;
+                            std::this_thread::sleep_for(std::chrono::milliseconds(COOLDOWN_PERIOD_MS));
+                        }
+
+                        std::cout << "Attempting to relaunch account " << accountNumber << " (Attempt " << relaunchAttempts + 1 << " of " << MAX_RELAUNCH_ATTEMPTS << ")" << std::endl;
+                        initializationComplete.store(false);
+                        injectionComplete.store(false);
+                        LaunchAccount(accountNumber, email, additionalArgs, relog);
+                        lastLaunchTime = std::chrono::steady_clock::now();
+                        launchInProgress = true;
+                        relaunchAttempts++;
                     }
-
-                    std::cout << "Attempting to relaunch account " << accountNumber << " (Attempt " << relaunchAttempts + 1 << " of " << MAX_RELAUNCH_ATTEMPTS << ")" << std::endl;
-                    initializationComplete.store(false);
-                    injectionComplete.store(false);
-                    LaunchAccount(accountNumber, email, additionalArgs, relog);
-                    lastLaunchTime = std::chrono::steady_clock::now();
-                    relaunchAttempts++;
-                }
-                else {
-                    std::cout << "Max relaunch attempts reached or relog disabled for account " << accountNumber << ". Exiting monitor." << std::endl;
-                    return;
-                }
-                std::this_thread::sleep_for(std::chrono::seconds(5));
-                continue;
-            }
-
-            PIDData* pidDataPtr = manager.getPIDData(pid);
-            if (!pidDataPtr) {
-                std::cout << "PID " << pid << " for account " << accountNumber << " not found in manager." << std::endl;
-                continue;
-            }
-
-            bool isRunning = isProcessRunning(pid);
-
-            if (!isRunning) {
-                std::cout << "Process " << pid << " for account " << accountNumber << " has exited." << std::endl;
-
-                {
-                    std::lock_guard<std::mutex> lock(*pidDataPtr->mtx);
-                    pidDataPtr->running = false;
-                }
-
-                manager.removePIDData(pid);
-
-                if (relog && relaunchAttempts < MAX_RELAUNCH_ATTEMPTS) {
-                    auto now = std::chrono::steady_clock::now();
-                    auto timeSinceLastLaunch = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastLaunchTime).count();
-
-                    if (timeSinceLastLaunch < RAPID_RESTART_THRESHOLD_MS) {
-                        std::cout << "Rapid restarts detected. Waiting for cooldown period." << std::endl;
-                        std::this_thread::sleep_for(std::chrono::milliseconds(COOLDOWN_PERIOD_MS));
+                    else {
+                        std::cout << "Max relaunch attempts reached or relog disabled for account " << accountNumber << ". Exiting monitor." << std::endl;
+                        return;
                     }
-
-                    std::cout << "Attempting to restart account " << accountNumber << " (Attempt " << relaunchAttempts + 1 << " of " << MAX_RELAUNCH_ATTEMPTS << ")" << std::endl;
-                    std::this_thread::sleep_for(std::chrono::seconds(5));
-                    initializationComplete.store(false);
-                    injectionComplete.store(false);
-                    LaunchAccount(accountNumber, email, additionalArgs, relog);
-                    lastLaunchTime = std::chrono::steady_clock::now();
-                    relaunchAttempts++;
                 }
-                else {
-                    std::cout << "Max relaunch attempts reached or relog disabled for account " << accountNumber << ". Exiting monitor." << std::endl;
-                    return;
+                else if (std::chrono::steady_clock::now() - lastLaunchTime > std::chrono::milliseconds(LAUNCH_GRACE_PERIOD_MS)) {
+                    std::cout << "Launch grace period expired for account " << accountNumber << ". Considering as failed launch." << std::endl;
+                    launchInProgress = false;
                 }
             }
             else {
-                std::lock_guard<std::mutex> lock(*pidDataPtr->mtx);
-                if (!pidDataPtr->initialized) {
-                    initTime += CHECK_INTERVAL_MS;
-                    if (initTime >= MAX_INIT_TIME_MS) {
-                        std::cout << "Initialization timed out for PID: " << pid << " (Account: " << accountNumber << ")" << std::endl;
-                        manager.removeLaunchingPID(pid);
-                        pidDataPtr->initialized = true;
+                launchInProgress = false;
+                PIDData* pidDataPtr = manager.getPIDData(pid);
+                if (!pidDataPtr) {
+                    std::cout << "PID " << pid << " for account " << accountNumber << " not found in manager." << std::endl;
+                    continue;
+                }
+
+                bool isRunning = isProcessRunning(pid);
+
+                if (!isRunning) {
+                    std::cout << "Process " << pid << " for account " << accountNumber << " has exited." << std::endl;
+
+                    {
+                        std::lock_guard<std::mutex> lock(*pidDataPtr->mtx);
+                        pidDataPtr->running = false;
+                        pidDataPtr->state = AccountState::Closed;
                     }
+
+                    manager.removePIDData(pid);
+                    continue;  // Go back to the start of the loop to handle relaunch
                 }
                 else {
-                    if (std::chrono::duration_cast<std::chrono::minutes>(std::chrono::steady_clock::now() - lastLaunchTime).count() >= 10) {
-                        relaunchAttempts = 0;
+                    std::lock_guard<std::mutex> lock(*pidDataPtr->mtx);
+                    if (pidDataPtr->state == AccountState::Initializing) {
+                        if (std::chrono::steady_clock::now() - lastLaunchTime > std::chrono::milliseconds(MAX_INIT_TIME_MS)) {
+                            std::cout << "Initialization timed out for PID: " << pid << " (Account: " << accountNumber << ")" << std::endl;
+                            manager.updateAccountState(pid, AccountState::Failed);
+                        }
+                    }
+                    else if (pidDataPtr->state == AccountState::Running) {
+                        if (std::chrono::duration_cast<std::chrono::minutes>(std::chrono::steady_clock::now() - lastLaunchTime).count() >= 10) {
+                            relaunchAttempts = 0;
+                        }
                     }
                 }
             }
@@ -274,12 +264,12 @@ export namespace wow_start {
         return pidData;
     }
 
-    void InitializeProcess(DWORD pid, PIDDataManager& manager, std::atomic<bool>& initializationComplete) {
+    bool InitializeProcess(DWORD pid, PIDDataManager& manager, std::atomic<bool>* initializationComplete) {
         std::cout << "Waiting for process to initialize... PID: " << pid << std::endl;
         HANDLE processHandle = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
         if (processHandle == NULL) {
             std::cerr << "Failed to open process handle for PID: " << pid << ". Error Code: " << GetLastError() << std::endl;
-            return;
+            return false;
         }
 
         DWORD waitResult = WaitForInputIdle(processHandle, 30000);
@@ -299,23 +289,23 @@ export namespace wow_start {
         }
         std::cout << "Process initialized for PID: " << pid << std::endl;
 
-        initializationComplete.store(true);
+        initializationComplete->store(true);
         pidData.cvInit->notify_all();
-    }
 
-    void InjectDLL(DWORD pid, PIDDataManager& manager, std::atomic<bool>& initializationComplete, std::atomic<bool>& injectionComplete) {
-        static std::atomic<bool> g_injectionComplete = false;
+        return true;
+    }
+    bool InjectDLL(DWORD pid, PIDDataManager& manager, std::atomic<bool>* initializationComplete, std::atomic<bool>* injectionComplete) {
         auto& pidData = manager.getOrCreatePIDData(pid);
 
         {
             std::unique_lock<std::mutex> lock(*pidData.mtx);
-            if (!pidData.cvInit->wait_for(lock, std::chrono::seconds(60), [&] { return initializationComplete.load() || !pidData.running; })) {
+            if (!pidData.cvInit->wait_for(lock, std::chrono::seconds(60), [&] { return initializationComplete->load() || !pidData.running; })) {
                 std::cerr << "Timed out waiting for process to initialize. PID: " << pid << std::endl;
-                return;
+                return false;
             }
         }
 
-        if (pidData.running && !pidData.changeProtectionDone && !g_injectionComplete.exchange(true)) {
+        if (pidData.running && !pidData.changeProtectionDone) {
             try {
                 std::cout << "Starting DLL injection for PID: " << pid << std::endl;
                 std::wstring dll_path = program_path(dll_name);
@@ -332,44 +322,32 @@ export namespace wow_start {
                     throw std::runtime_error("Failed to inject DLL: " + error);
                 }
 
-                // Implement retry mechanism for changing memory protection
-                const int MAX_RETRIES = 5;
-                const int RETRY_INTERVAL_MS = 100;
-                DWORD result = 0;
-                for (int i = 0; i < MAX_RETRIES; i++) {
-                    result = change_protection(PAGE_EXECUTE_READWRITE);
-                    if (result == 0) {
-                        std::cout << "Memory protection changed successfully on attempt " << (i + 1) << std::endl;
-                        break;
-                    }
-                    std::cerr << "Failed to change memory protection on attempt " << (i + 1) << ". Error code: " << result << std::endl;
-                    if (i < MAX_RETRIES - 1) {
-                        std::this_thread::yield();  // Yield to other threads instead of sleeping
-                    }
-                }
-
-                if (result != 0) {
-                    throw std::runtime_error("Failed to change memory protection after " + std::to_string(MAX_RETRIES) + " attempts");
+                if (!change_protection(pid, PAGE_EXECUTE_READWRITE)) {
+                    throw std::runtime_error("Failed to change memory protection");
                 }
 
                 pidData.changeProtectionDone = true;
                 pidData.isNewPID = false;
                 manager.removeLaunchingPID(pid);
                 std::cout << "DLL injection complete for PID: " << pid << std::endl;
-                injectionComplete.store(true);
+                injectionComplete->store(true);
+
+                return true;
             }
             catch (const std::exception& e) {
                 std::cerr << "Error during injection for PID " << pid << ": " << e.what() << std::endl;
-                injectionComplete.store(false);
+                injectionComplete->store(false);
+                return false;
             }
         }
 
         pidData.cvMonitor->notify_all();
+        return true;
     }
-    void WaitForCompletion(DWORD pid, std::atomic<bool>& initializationComplete, std::atomic<bool>& injectionComplete) {
+    void WaitForCompletion(DWORD pid, std::atomic<bool>* initializationComplete, std::atomic<bool>* injectionComplete) {
         auto startTime = std::chrono::steady_clock::now();
         while (std::chrono::steady_clock::now() - startTime < std::chrono::seconds(120)) {
-            if (initializationComplete.load() && injectionComplete.load()) {
+            if (initializationComplete->load() && injectionComplete->load()) {
                 std::cout << "Initialization and injection completed successfully for PID: " << pid << std::endl;
                 return;
             }
@@ -377,45 +355,137 @@ export namespace wow_start {
         }
         std::cerr << "Timeout: Initialization or injection did not complete within 2 minutes for PID: " << pid << std::endl;
     }
+    // Helper function to check if a process is still running
+    bool IsProcessRunning(DWORD pid) {
+        HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+        if (process == NULL) {
+            return false;
+        }
+        DWORD result = WaitForSingleObject(process, 0);
+        CloseHandle(process);
+        return result == WAIT_TIMEOUT;
+    }
+
+    // Helper function to terminate a process
+    void TerminateProcessIfRunning(DWORD pid) {
+        HANDLE process = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+        if (process != NULL) {
+            TerminateProcess(process, 1);
+            CloseHandle(process);
+        }
+    }
+
     void LaunchAccount(int accountNumber, const std::string& email, const std::string& additionalArgs, bool relog) {
-        initializationComplete.store(false);
-        injectionComplete.store(false);
+        const int MAX_RETRIES = 3;
+        const int RETRY_DELAY_MS = 5000;
 
         PIDDataManager& manager = PIDDataManager::getInstance();
         static std::mutex launchMutex;
-        std::lock_guard<std::mutex> lock(launchMutex);
 
-        std::cout << "Launching account " << accountNumber << " with email: " << email << std::endl;
-        std::cout << "Additional arguments: " << additionalArgs << std::endl;
+        for (int attempt = 0; attempt < MAX_RETRIES; ++attempt) {
+            std::lock_guard<std::mutex> lock(launchMutex);
 
-        PROCESS_INFORMATION pi = LaunchProcess(accountNumber, email, additionalArgs);
-        if (pi.hProcess == NULL) {
-            std::cerr << "Failed to create process." << std::endl;
-            return;
+            // Check if the account is already in a non-launchable state
+            if (manager.isAccountInState(accountNumber, AccountState::Launching) ||
+                manager.isAccountInState(accountNumber, AccountState::Initializing) ||
+                manager.isAccountInState(accountNumber, AccountState::Injecting) ||
+                manager.isAccountInState(accountNumber, AccountState::Running)) {
+                std::cout << "Account " << accountNumber << " is already active. Skipping launch..." << std::endl;
+                return;
+            }
+
+            std::cout << "Launching account " << accountNumber << " (Attempt " << attempt + 1 << " of " << MAX_RETRIES << ")" << std::endl;
+            std::cout << "Email: " << email << ", Additional arguments: " << additionalArgs << std::endl;
+
+            PROCESS_INFORMATION pi = LaunchProcess(accountNumber, email, additionalArgs);
+            if (pi.hProcess == NULL) {
+                std::cerr << "Failed to create process. Retrying..." << std::endl;
+                std::this_thread::sleep_for(std::chrono::milliseconds(RETRY_DELAY_MS));
+                continue;
+            }
+
+            DWORD pid = pi.dwProcessId;
+            std::cout << "Process created successfully. PID: " << pid << std::endl;
+
+            auto pidData = CreatePIDData(pid, accountNumber, email, relog);
+            pidData->state = AccountState::Launching;
+            manager.updatePIDData(pid, std::move(pidData));
+
+            auto threads = std::make_shared<std::vector<std::thread>>();
+
+            // Initialize and inject
+            threads->emplace_back([pid, &manager]() {
+                manager.updateAccountState(pid, AccountState::Initializing);
+                if (!InitializeProcess(pid, manager, &initializationComplete)) {
+                    std::cerr << "Failed to initialize process " << pid << std::endl;
+                    manager.updateAccountState(pid, AccountState::Failed);
+                    return;
+                }
+
+                manager.updateAccountState(pid, AccountState::Injecting);
+                if (initializationComplete.load() && !InjectDLL(pid, manager, &initializationComplete, &injectionComplete)) {
+                    std::cerr << "Failed to inject DLL into process " << pid << std::endl;
+                    manager.updateAccountState(pid, AccountState::Failed);
+                    return;
+                }
+
+                if (injectionComplete.load()) {
+                    manager.updateAccountState(pid, AccountState::Running);
+                }
+                });
+
+            // Wait for completion
+            threads->emplace_back([pid, &manager]() {
+                WaitForCompletion(pid, &initializationComplete, &injectionComplete);
+                if (initializationComplete.load() && injectionComplete.load()) {
+                    manager.updateAccountState(pid, AccountState::Running);
+                }
+                else {
+                    manager.updateAccountState(pid, AccountState::Failed);
+                }
+                });
+
+            // Start pipes_server with timeout
+            threads->emplace_back([pid, relog]() {
+                if (!pipes_server(pid, relog)) {
+                    std::cerr << "Pipes server failed for process " << pid << std::endl;
+                }
+                });
+
+            // Start monitorAndRelog
+            threads->emplace_back(monitorAndRelog, accountNumber, email, additionalArgs, relog);
+
+            // Create a thread to join all other threads and update global variables
+            std::thread([threads, pid, &manager]() {
+                const int JOIN_TIMEOUT_MS = 60000; // 1 minute timeout
+                auto start = std::chrono::steady_clock::now();
+
+                for (auto& t : *threads) {
+                    if (t.joinable()) {
+                        t.join();
+                    }
+                }
+
+                auto end = std::chrono::steady_clock::now();
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+                if (duration >= JOIN_TIMEOUT_MS || !IsProcessRunning(pid)) {
+                    std::cerr << "Process " << pid << " failed to initialize or inject properly." << std::endl;
+                    manager.updateAccountState(pid, AccountState::Failed);
+                    TerminateProcessIfRunning(pid);
+                    return;
+                }
+
+                // Ensure the final state is set to Running if everything succeeded
+                if (initializationComplete.load() && injectionComplete.load()) {
+                    manager.updateAccountState(pid, AccountState::Running);
+                }
+                }).detach();
+
+                // If we've reached this point, we've successfully started the launch process
+                return;
         }
 
-        DWORD pid = pi.dwProcessId;
-        std::cout << "Process created successfully. PID: " << pid << std::endl;
-
-        auto pidData = CreatePIDData(pid, accountNumber, email, relog);
-        manager.updatePIDData(pid, std::move(pidData));
-        manager.addLaunchingPID(pid);
-
-        
-        // Create threads instead of using std::async
-        std::thread initThread(InitializeProcess, pid, std::ref(manager), std::ref(initializationComplete));
-        std::thread injectThread(InjectDLL, pid, std::ref(manager), std::ref(initializationComplete), std::ref(injectionComplete));
-        std::thread waitThread(WaitForCompletion, pid, std::ref(initializationComplete), std::ref(injectionComplete));
-        std::thread pipesThread(pipes_server, pid, relog);
-        std::thread monitorThread(monitorAndRelog, accountNumber, email, additionalArgs, relog);
-
-        // Detach threads to let them run independently
-        initThread.detach();
-        injectThread.detach();
-        waitThread.detach();
-        pipesThread.detach();
-        monitorThread.detach();
+        std::cerr << "Failed to launch account " << accountNumber << " after " << MAX_RETRIES << " attempts." << std::endl;
     }
-    
-
 }

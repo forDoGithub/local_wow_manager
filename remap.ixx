@@ -61,6 +61,8 @@ DWORD query_protection(HANDLE _process, LPVOID base) {
 
 bool restore_memory(HANDLE _process, LPVOID base, SIZE_T sz_region) {
     DWORD old_protection;
+    DWORD pid = GetProcessId(_process);
+    std::wcout << L"[DEBUG][PID:" << pid << "] Restoring memory protection..." << std::endl;
     if (!VirtualProtectEx(_process, base, sz_region, PAGE_EXECUTE_READ, &old_protection)) {
         std::wcerr << L"VirtualProtectEx failed in restore_memory. Error code: " << GetLastError() << std::endl;
         return false;
@@ -69,7 +71,8 @@ bool restore_memory(HANDLE _process, LPVOID base, SIZE_T sz_region) {
 }
 
 bool remap_memory(HANDLE _process, LPVOID base, SIZE_T sz_region) {
-    std::wcout << L"Allocating memory for copy buffer..." << std::endl;
+    DWORD pid = GetProcessId(_process);
+    std::wcout << L"[DEBUG][PID:" << pid << "] Allocating memory for copy buffer..." << std::endl;
     LPVOID allocation = VirtualAllocEx(_process, nullptr, sz_region, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
     if (allocation == nullptr) {
         std::wcerr << L"VirtualAllocEx failed. Error code: " << GetLastError() << std::endl;
@@ -192,61 +195,52 @@ LPVOID base_address(HANDLE process)
     return nullptr;
 }
 
-export int change_protection(DWORD protection) {
-    std::wcout << L"[DEBUG] Entering change_protection function. Requested protection: " << protection << std::endl;
+export int change_protection(DWORD pid, DWORD protection) {
+    std::wcout << L"[DEBUG][PID:" << pid << "] Entering change_protection function. Requested protection: " << protection << std::endl;
 
-    std::wcout << L"Creating process snapshot..." << std::endl;
-    PROCESSENTRY32W pe32{};
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    pe32.dwSize = sizeof(PROCESSENTRY32W);
-    if (snapshot == INVALID_HANDLE_VALUE) {
-        std::wcerr << L"CreateToolhelp32Snapshot failed. Error code: " << GetLastError() << std::endl;
+    // Open the specific process using the PID
+    HANDLE process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+    if (process == nullptr) {
+        std::wcerr << L"[DEBUG][PID:" << pid << "] OpenProcess failed. Error code: " << GetLastError() << std::endl;
         return 1;
     }
 
-    HANDLE process = nullptr;
-    if (Process32FirstW(snapshot, &pe32)) {
-        do {
-            if (wcscmp(pe32.szExeFile, L"Wow.exe") == 0) {
-                process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pe32.th32ProcessID);
-                if (process == nullptr) {
-                    std::wcerr << L"OpenProcess failed. Error code: " << GetLastError() << std::endl;
-                    CloseHandle(snapshot);
-                    return 1;
-                }
-                break;
-            }
-        } while (Process32NextW(snapshot, &pe32));
+    // Verify that the opened process is actually Wow.exe
+    WCHAR processName[MAX_PATH];
+    if (GetModuleBaseNameW(process, NULL, processName, MAX_PATH) == 0) {
+        std::wcerr << L"[DEBUG][PID:" << pid << "] GetModuleBaseNameW failed. Error code: " << GetLastError() << std::endl;
+        CloseHandle(process);
+        return 1;
     }
-    CloseHandle(snapshot);
 
-    if (process == nullptr) {
-        std::wcerr << L"Failed to find Wow.exe process." << std::endl;
+    if (wcscmp(processName, L"Wow.exe") != 0) {
+        std::wcerr << L"[DEBUG][PID:" << pid << "] Process is not Wow.exe" << std::endl;
+        CloseHandle(process);
         return 1;
     }
 
     LPVOID base = base_address(process);
     if (base == nullptr) {
-        std::wcerr << L"Failed to get base address of the process." << std::endl;
+        std::wcerr << L"[DEBUG][PID:" << pid << "] Failed to get base address of the process." << std::endl;
         CloseHandle(process);
         return 1;
     }
 
     MEMORY_BASIC_INFORMATION basicInformation{};
-    std::wcout << L"Querying process memory..." << std::endl;
+    std::wcout << L"[DEBUG][PID:" << pid << "] Querying process memory..." << std::endl;
     if (VirtualQueryEx(process, base, &basicInformation, sizeof(MEMORY_BASIC_INFORMATION)) == 0) {
-        std::wcerr << L"VirtualQueryEx failed. Error code: " << GetLastError() << std::endl;
+        std::wcerr << L"[DEBUG][PID:" << pid << "] VirtualQueryEx failed. Error code: " << GetLastError() << std::endl;
         CloseHandle(process);
         return 1;
     }
 
     SIZE_T sz_region = basicInformation.RegionSize;
-    std::wcout << L"Current protection: " << basicInformation.Protect << std::endl;
+    std::wcout << L"[DEBUG][PID:" << pid << "] Current protection: " << basicInformation.Protect << std::endl;
 
-    std::wcout << L"Suspending process..." << std::endl;
+    std::wcout << L"[DEBUG][PID:" << pid << "] Suspending process..." << std::endl;
     NTSTATUS status = NtSuspendProcess(process);
     if (status != STATUS_SUCCESS) {
-        std::wcerr << L"NtSuspendProcess failed. NTSTATUS: 0x" << std::hex << status << std::endl;
+        std::wcerr << L"[DEBUG][PID:" << pid << "] NtSuspendProcess failed. NTSTATUS: 0x" << std::hex << status << std::endl;
         CloseHandle(process);
         return 1;
     }
@@ -260,34 +254,33 @@ export int change_protection(DWORD protection) {
     }
 
     if (!operation_success) {
-        std::wcerr << L"Failed to change memory protection." << std::endl;
+        std::wcerr << L"[DEBUG][PID:" << pid << "] Failed to change memory protection." << std::endl;
         NtResumeProcess(process);
         CloseHandle(process);
         return 1;
     }
 
-    std::wcout << L"Resuming process..." << std::endl;
+    std::wcout << L"[DEBUG][PID:" << pid << "] Resuming process..." << std::endl;
     status = NtResumeProcess(process);
     if (status != STATUS_SUCCESS) {
-        std::wcerr << L"NtResumeProcess failed. NTSTATUS: 0x" << std::hex << status << std::endl;
+        std::wcerr << L"[DEBUG][PID:" << pid << "] NtResumeProcess failed. NTSTATUS: 0x" << std::hex << status << std::endl;
         CloseHandle(process);
         return 1;
     }
 
     DWORD new_protection = query_protection(process, base);
-    std::wcout << L"New protection of the memory region: " << new_protection << std::endl;
+    std::wcout << L"[DEBUG][PID:" << pid << "] New protection of the memory region: " << new_protection << std::endl;
 
     CloseHandle(process);
 
-
     if ((protection == PAGE_EXECUTE_READWRITE && new_protection == PAGE_EXECUTE_READWRITE) ||
         (protection == PAGE_EXECUTE_READ && new_protection == PAGE_EXECUTE_READ)) {
-        std::wcout << L"[DEBUG] Operation completed successfully. New protection: " << new_protection
+        std::wcout << L"[DEBUG][PID:" << pid << "] Operation completed successfully. New protection: " << new_protection
             << L", Desired protection: " << protection << std::endl;
         return 0;  // Success
     }
     else {
-        std::wcerr << L"[DEBUG] Failed to change memory protection. Current protection: " << new_protection
+        std::wcerr << L"[DEBUG][PID:" << pid << "] Failed to change memory protection. Current protection: " << new_protection
             << L", Desired protection: " << protection << std::endl;
         return 1;  // Failure
     }

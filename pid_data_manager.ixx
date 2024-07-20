@@ -10,8 +10,17 @@ export struct AccountConfig {
     bool relog;
     std::string serverName;
 };
-
+export enum class AccountState {
+    NotLaunched,
+    Launching,
+    Initializing,
+    Injecting,
+    Running,
+    Failed,
+    Closed
+};
 export struct PIDData {
+    AccountState state;
     bool clientConnected = false;
     bool relog = false;
     std::chrono::system_clock::time_point startTime;
@@ -42,7 +51,9 @@ export struct PIDData {
         imguiWindowOpen(false),
         mtx(std::make_unique<std::mutex>()),
         cvInit(std::make_unique<std::condition_variable>()),
-        cvMonitor(std::make_unique<std::condition_variable>()) {}
+        cvMonitor(std::make_unique<std::condition_variable>()),
+        state(AccountState::NotLaunched) {}
+
 
     // Delete copy constructor and assignment operator
     PIDData(const PIDData&) = delete;
@@ -75,6 +86,25 @@ export struct PIDData {
 
 export class PIDDataManager {
 public:
+    bool isAccountInState(int accountNumber, AccountState state) {
+        std::lock_guard<std::mutex> lock(mapMutex);
+        for (const auto& [pid, data] : pidDataMap) {
+            if (data->accountNumber == accountNumber && data->state == state) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void updateAccountState(DWORD pid, AccountState newState) {
+        std::lock_guard<std::mutex> lock(mapMutex);
+        auto it = pidDataMap.find(pid);
+        if (it != pidDataMap.end()) {
+            it->second->state = newState;
+        }
+    }
+
+
     static PIDDataManager& getInstance() {
         static PIDDataManager instance;
         return instance;
@@ -96,6 +126,25 @@ public:
         std::cout << "Updated PID data for PID " << pid << ", Running: " << pidDataMap[pid]->running << std::endl;
     }
 
+    bool isAccountLaunching(int accountNumber) {
+        std::lock_guard<std::mutex> lock(mapMutex);
+        for (const auto& [pid, data] : launchingPIDDataMap) {
+            if (data->accountNumber == accountNumber) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+
+    void addLaunchingPID(DWORD pid, int accountNumber) {
+        std::lock_guard<std::mutex> lock(mapMutex);
+        auto [it, inserted] = launchingPIDDataMap.emplace(pid, std::make_unique<PIDData>());
+        it->second->isNewPID = true;
+        it->second->accountNumber = accountNumber;
+        it->second->startTime = std::chrono::system_clock::now();
+    }
+
     void deactivatePID(int pid) {
         std::lock_guard<std::mutex> lock(mapMutex);
         auto it = pidDataMap.find(pid);
@@ -105,12 +154,6 @@ public:
         }
     }
 
-    void addLaunchingPID(int pid) {
-        std::lock_guard<std::mutex> lock(mapMutex);
-        auto [it, inserted] = launchingPIDDataMap.emplace(pid, std::make_unique<PIDData>());
-        it->second->isNewPID = true;
-        it->second->startTime = std::chrono::system_clock::now();
-    }
 
     void removeLaunchingPID(DWORD pid) {
         std::lock_guard<std::mutex> lock(mapMutex);

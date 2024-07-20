@@ -202,11 +202,11 @@ void handle_client(HANDLE hPipe, DWORD pid, const std::wstring& pipe_name) {
             // Handle the message
             std::wstring response;
             if (received_message == L"_remap") {
-                change_protection(PAGE_EXECUTE_READWRITE);
+                change_protection(pid, PAGE_EXECUTE_READWRITE);
                 response = L"Remap successful";
             }
             else if (received_message == L"_restore") {
-                change_protection(PAGE_EXECUTE_READ);
+                change_protection(pid, PAGE_EXECUTE_READ);
                 response = L"Restore successful";
             }
             else {
@@ -278,7 +278,8 @@ export int pipes_server(DWORD pid, bool relog) {
         if (hPipe == INVALID_HANDLE_VALUE) {
             DWORD error = GetLastError();
             std::wcerr << L"[DEBUG] Failed to create named pipe for PID " << pid << L". Error code: " << error << std::endl;
-            return 1;
+            std::this_thread::sleep_for(std::chrono::seconds(1));  // Add a delay before retrying
+            continue;  // Try to create the pipe again instead of returning
         }
 
         std::wcout << L"[DEBUG] Waiting for client connection on pipe " << pipe_name << L"..." << std::endl;
@@ -301,7 +302,7 @@ export int pipes_server(DWORD pid, bool relog) {
             case ERROR_IO_PENDING:
             {
                 std::wcout << L"[DEBUG] Connection is pending. Waiting for completion..." << std::endl;
-                DWORD waitResult = WaitForSingleObject(connectOverlap.hEvent, INFINITE);
+                DWORD waitResult = WaitForSingleObject(connectOverlap.hEvent, 30000);  // Increased timeout to 30 seconds
                 std::wcout << L"[DEBUG] Wait result: " << waitResult << std::endl;
                 if (waitResult == WAIT_OBJECT_0) {
                     DWORD bytesTransferred = 0;
@@ -311,6 +312,9 @@ export int pipes_server(DWORD pid, bool relog) {
                     else {
                         std::wcerr << L"[DEBUG] GetOverlappedResult failed. Error: " << GetLastError() << std::endl;
                     }
+                }
+                else if (waitResult == WAIT_TIMEOUT) {
+                    std::wcerr << L"[DEBUG] Wait for ConnectNamedPipe timed out." << std::endl;
                 }
                 else {
                     std::wcerr << L"[DEBUG] Wait for ConnectNamedPipe failed. Error: " << GetLastError() << std::endl;
